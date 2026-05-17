@@ -13,10 +13,15 @@ Run commands from this directory:
 
 ```bash
 go run . -api http://127.0.0.1:8080 -nodes
+go run . -api http://127.0.0.1:8080 -positions
+go run . -api http://127.0.0.1:8080 -weather
 go run . -api http://127.0.0.1:8080 -channels
 go run . -api http://127.0.0.1:8080 -messages
 go run . -api http://127.0.0.1:8080 -listen
 ```
+
+`-listen` prints live text messages, position updates, and weather/environment
+telemetry updates.
 
 Send a message:
 

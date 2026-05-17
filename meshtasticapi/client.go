@@ -48,13 +48,15 @@ type Client struct {
 type Event struct {
 	Type EventType
 
-	Packet     *Packet
-	Node       *Node
-	MyNode     *MyNode
-	Channel    *Channel
-	TraceRoute *TraceRoute
-	Log        string
-	Raw        *meshtastic.FromRadio
+	Packet      *Packet
+	Node        *Node
+	Position    *Position
+	Environment *EnvironmentTelemetry
+	MyNode      *MyNode
+	Channel     *Channel
+	TraceRoute  *TraceRoute
+	Log         string
+	Raw         *meshtastic.FromRadio
 }
 
 type EventType string
@@ -64,6 +66,8 @@ const (
 	EventPacket         EventType = "packet"
 	EventEncrypted      EventType = "encrypted"
 	EventNode           EventType = "node"
+	EventPosition       EventType = "position"
+	EventEnvironment    EventType = "environment"
 	EventMyNode         EventType = "my_node"
 	EventChannel        EventType = "channel"
 	EventTraceRoute     EventType = "traceroute"
@@ -74,18 +78,20 @@ const (
 )
 
 type Packet struct {
-	ID        uint32
-	From      uint32
-	To        uint32
-	Channel   uint32
-	Port      meshtastic.PortNum
-	Payload   []byte
-	Text      string
-	RSSI      int32
-	SNR       float32
-	RxTime    time.Time
-	WantAck   bool
-	Encrypted bool
+	ID          uint32
+	From        uint32
+	To          uint32
+	Channel     uint32
+	Port        meshtastic.PortNum
+	Payload     []byte
+	Text        string
+	Position    *Position
+	Environment *EnvironmentTelemetry
+	RSSI        int32
+	SNR         float32
+	RxTime      time.Time
+	WantAck     bool
+	Encrypted   bool
 }
 
 type Node struct {
@@ -93,6 +99,44 @@ type Node struct {
 	ID        string
 	LongName  string
 	ShortName string
+	Position  *Position
+}
+
+type Position struct {
+	NodeNum       uint32
+	Latitude      float64
+	Longitude     float64
+	Altitude      *int32
+	AltitudeHAE   *int32
+	GroundSpeed   *uint32
+	GroundTrack   *uint32
+	SatsInView    uint32
+	PrecisionBits uint32
+	Timestamp     time.Time
+	ReceivedAt    time.Time
+}
+
+type EnvironmentTelemetry struct {
+	NodeNum            uint32
+	Temperature        *float32
+	RelativeHumidity   *float32
+	BarometricPressure *float32
+	GasResistance      *float32
+	Voltage            *float32
+	Current            *float32
+	IAQ                *uint32
+	Distance           *float32
+	Lux                *float32
+	WhiteLux           *float32
+	IRLux              *float32
+	UVLux              *float32
+	WindDirection      *uint32
+	WindSpeed          *float32
+	WindGust           *float32
+	WindLull           *float32
+	Weight             *float32
+	Timestamp          time.Time
+	ReceivedAt         time.Time
 }
 
 type MyNode struct {
@@ -499,15 +543,19 @@ func decodeFromRadio(msg *meshtastic.FromRadio) []Event {
 	case *meshtastic.FromRadio_NodeInfo:
 		node := payload.NodeInfo
 		user := node.GetUser()
+		decodedNode := Node{
+			Num:       node.GetNum(),
+			ID:        user.GetId(),
+			LongName:  user.GetLongName(),
+			ShortName: user.GetShortName(),
+		}
+		if position := decodePosition(node.GetPosition(), node.GetNum(), time.Now()); position != nil {
+			decodedNode.Position = position
+		}
 		return []Event{{
 			Type: EventNode,
-			Node: &Node{
-				Num:       node.GetNum(),
-				ID:        user.GetId(),
-				LongName:  user.GetLongName(),
-				ShortName: user.GetShortName(),
-			},
-			Raw: msg,
+			Node: &decodedNode,
+			Raw:  msg,
 		}}
 	case *meshtastic.FromRadio_Channel:
 		channel := decodeChannel(payload.Channel)
@@ -566,6 +614,103 @@ func decodeChannel(channel *meshtastic.Channel) Channel {
 	return decoded
 }
 
+func decodePosition(position *meshtastic.Position, nodeNum uint32, receivedAt time.Time) *Position {
+	if position == nil || position.LatitudeI == nil || position.LongitudeI == nil {
+		return nil
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+
+	timestamp := receivedAt
+	switch {
+	case position.GetTimestamp() != 0:
+		timestamp = time.Unix(int64(position.GetTimestamp()), 0)
+	case position.GetTime() != 0:
+		timestamp = time.Unix(int64(position.GetTime()), 0)
+	}
+
+	decoded := &Position{
+		NodeNum:       nodeNum,
+		Latitude:      float64(position.GetLatitudeI()) * 1e-7,
+		Longitude:     float64(position.GetLongitudeI()) * 1e-7,
+		SatsInView:    position.GetSatsInView(),
+		PrecisionBits: position.GetPrecisionBits(),
+		Timestamp:     timestamp,
+		ReceivedAt:    receivedAt,
+	}
+	if position.Altitude != nil {
+		value := position.GetAltitude()
+		decoded.Altitude = &value
+	}
+	if position.AltitudeHae != nil {
+		value := position.GetAltitudeHae()
+		decoded.AltitudeHAE = &value
+	}
+	if position.GroundSpeed != nil {
+		value := position.GetGroundSpeed()
+		decoded.GroundSpeed = &value
+	}
+	if position.GroundTrack != nil {
+		value := position.GetGroundTrack()
+		decoded.GroundTrack = &value
+	}
+	return decoded
+}
+
+func decodeEnvironmentTelemetry(telemetry *meshtastic.Telemetry, nodeNum uint32, receivedAt time.Time) *EnvironmentTelemetry {
+	metrics := telemetry.GetEnvironmentMetrics()
+	if metrics == nil {
+		return nil
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := receivedAt
+	if telemetry.GetTime() != 0 {
+		timestamp = time.Unix(int64(telemetry.GetTime()), 0)
+	}
+
+	return &EnvironmentTelemetry{
+		NodeNum:            nodeNum,
+		Temperature:        float32Ptr(metrics.Temperature),
+		RelativeHumidity:   float32Ptr(metrics.RelativeHumidity),
+		BarometricPressure: float32Ptr(metrics.BarometricPressure),
+		GasResistance:      float32Ptr(metrics.GasResistance),
+		Voltage:            float32Ptr(metrics.Voltage),
+		Current:            float32Ptr(metrics.Current),
+		IAQ:                uint32Ptr(metrics.Iaq),
+		Distance:           float32Ptr(metrics.Distance),
+		Lux:                float32Ptr(metrics.Lux),
+		WhiteLux:           float32Ptr(metrics.WhiteLux),
+		IRLux:              float32Ptr(metrics.IrLux),
+		UVLux:              float32Ptr(metrics.UvLux),
+		WindDirection:      uint32Ptr(metrics.WindDirection),
+		WindSpeed:          float32Ptr(metrics.WindSpeed),
+		WindGust:           float32Ptr(metrics.WindGust),
+		WindLull:           float32Ptr(metrics.WindLull),
+		Weight:             float32Ptr(metrics.Weight),
+		Timestamp:          timestamp,
+		ReceivedAt:         receivedAt,
+	}
+}
+
+func float32Ptr(value *float32) *float32 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+func uint32Ptr(value *uint32) *uint32 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
 func decodeMeshPacket(packet *meshtastic.MeshPacket) Event {
 	if packet == nil {
 		return Event{Type: EventPacket}
@@ -605,6 +750,24 @@ func decodeMeshPacket(packet *meshtastic.MeshPacket) Event {
 	case meshtastic.PortNum_TEXT_MESSAGE_COMPRESSED_APP:
 		event.Type = EventText
 		event.Packet.Text = string(decoded.GetPayload())
+	case meshtastic.PortNum_POSITION_APP:
+		var position meshtastic.Position
+		if err := proto.Unmarshal(decoded.GetPayload(), &position); err == nil {
+			if decodedPosition := decodePosition(&position, packet.GetFrom(), event.Packet.RxTime); decodedPosition != nil {
+				event.Type = EventPosition
+				event.Packet.Position = decodedPosition
+				event.Position = decodedPosition
+			}
+		}
+	case meshtastic.PortNum_TELEMETRY_APP:
+		var telemetry meshtastic.Telemetry
+		if err := proto.Unmarshal(decoded.GetPayload(), &telemetry); err == nil {
+			if environment := decodeEnvironmentTelemetry(&telemetry, packet.GetFrom(), event.Packet.RxTime); environment != nil {
+				event.Type = EventEnvironment
+				event.Packet.Environment = environment
+				event.Environment = environment
+			}
+		}
 	case meshtastic.PortNum_TRACEROUTE_APP:
 		var route meshtastic.RouteDiscovery
 		if err := proto.Unmarshal(decoded.GetPayload(), &route); err == nil {

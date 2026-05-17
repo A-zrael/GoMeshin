@@ -619,9 +619,16 @@ func formatNode(node mesh.Node) string {
 		name = "(unnamed)"
 	}
 	if node.LongName != "" && node.LongName != name {
-		return fmt.Sprintf("!%08x  %-8s  %s", node.Num, name, node.LongName)
+		return fmt.Sprintf("!%08x  %-8s  %s%s", node.Num, name, node.LongName, formatPositionSuffix(node.Position))
 	}
-	return fmt.Sprintf("!%08x  %s", node.Num, name)
+	return fmt.Sprintf("!%08x  %s%s", node.Num, name, formatPositionSuffix(node.Position))
+}
+
+func formatPositionSuffix(position *mesh.Position) string {
+	if position == nil {
+		return ""
+	}
+	return fmt.Sprintf("  %.6f,%.6f", position.Latitude, position.Longitude)
 }
 
 func renderMessages(messages []mesh.Message, channel string, height int, width int) string {

@@ -61,5 +61,8 @@ instead or start the daemon with:
 -cors-origin http://127.0.0.1:8090,http://localhost:8090
 ```
 
-The page can list nodes/channels/messages, send channel messages, receive live
-messages, and run traceroute through the daemon API.
+The page can list nodes/channels/messages, plot latest known node coordinates on
+an OpenStreetMap view, show latest weather/environment telemetry, send channel
+messages, receive live updates, and run traceroute through the daemon API. The
+map uses Leaflet and OpenStreetMap tiles, so the browser needs network access to
+load the map library and tiles.

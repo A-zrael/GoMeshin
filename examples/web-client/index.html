@@ -4,6 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GoMeshin Web Client</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIINfQGe36fRjTKFZ5VkU7n3tC4d2v3zZX/g="
+      crossorigin=""
+    />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -21,34 +27,62 @@
       </form>
     </header>
 
+    <nav class="tabs" aria-label="Views">
+      <button class="tab active" type="button" data-tab="chat">Chat</button>
+      <button class="tab" type="button" data-tab="map">Map</button>
+      <button class="tab" type="button" data-tab="weather">Weather</button>
+      <button class="tab" type="button" data-tab="nodes">Nodes</button>
+      <button class="tab" type="button" data-tab="tools">Tools</button>
+    </nav>
+
     <main class="layout">
-      <section class="pane chat-pane">
-        <div class="pane-header">
-          <div>
-            <h2>Messages</h2>
-            <span id="message-count">0 shown</span>
+      <section class="view active" data-view="chat">
+        <section class="pane chat-pane">
+          <div class="pane-header">
+            <div>
+              <h2>Messages</h2>
+              <span id="message-count">0 shown</span>
+            </div>
+            <label>
+              Channel
+              <select id="channel-select"></select>
+            </label>
           </div>
-          <label>
-            Channel
-            <select id="channel-select"></select>
-          </label>
-        </div>
-        <ol id="messages" class="messages"></ol>
-        <form id="send-form" class="send-form">
-          <input id="message-text" type="text" placeholder="Message" autocomplete="off" />
-          <button type="submit">Send</button>
-        </form>
+          <ol id="messages" class="messages"></ol>
+          <form id="send-form" class="send-form">
+            <input id="message-text" type="text" placeholder="Message" autocomplete="off" />
+            <button type="submit">Send</button>
+          </form>
+        </section>
       </section>
 
-      <aside class="side">
-        <section class="pane">
+      <section class="view map-view" data-view="map">
+        <section class="pane map-pane">
           <div class="pane-header">
-            <h2>Channels</h2>
-            <button id="refresh-channels" type="button">Refresh</button>
+            <div>
+              <h2>Map</h2>
+              <span id="map-summary">0 positions</span>
+            </div>
+            <button id="fit-map" type="button">Fit</button>
           </div>
-          <ul id="channels" class="list"></ul>
+          <div id="map" class="map"></div>
         </section>
+      </section>
 
+      <section class="view" data-view="weather">
+        <section class="pane weather-pane">
+          <div class="pane-header">
+            <div>
+              <h2>Weather</h2>
+              <span id="weather-summary">0 stations</span>
+            </div>
+            <button id="refresh-weather" type="button">Refresh</button>
+          </div>
+          <div id="weather" class="weather-grid"></div>
+        </section>
+      </section>
+
+      <section class="view split-view" data-view="nodes">
         <section class="pane">
           <div class="pane-header">
             <h2>Nodes</h2>
@@ -60,17 +94,31 @@
 
         <section class="pane">
           <div class="pane-header">
-            <h2>Traceroute</h2>
+            <h2>Channels</h2>
+            <button id="refresh-channels" type="button">Refresh</button>
           </div>
-          <form id="trace-form" class="trace-form">
-            <select id="trace-target"></select>
-            <button type="submit">Run</button>
-          </form>
-          <pre id="trace-output" class="trace-output">No traceroute yet.</pre>
+          <ul id="channels" class="list"></ul>
         </section>
-      </aside>
+      </section>
+
+      <section class="view" data-view="tools">
+        <div class="pane-header">
+          <h2>Traceroute</h2>
+        </div>
+        <form id="trace-form" class="trace-form">
+          <select id="trace-target"></select>
+          <button type="submit">Run</button>
+        </form>
+        <pre id="trace-output" class="trace-output">No traceroute yet.</pre>
+      </section>
     </main>
 
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+      defer
+    ></script>
     <script src="./app.js" defer></script>
   </body>
 </html>

@@ -27,13 +27,17 @@ type Mesh struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu       sync.RWMutex
-	myNode   uint32
-	nodes    map[uint32]Node
-	channels map[int32]Channel
+	mu           sync.RWMutex
+	myNode       uint32
+	nodes        map[uint32]Node
+	positions    map[uint32]Position
+	environments map[uint32]EnvironmentTelemetry
+	channels     map[int32]Channel
 
-	subsMu      sync.RWMutex
-	subscribers map[chan Message]struct{}
+	subsMu                 sync.RWMutex
+	subscribers            map[chan Message]struct{}
+	positionSubscribers    map[chan Position]struct{}
+	environmentSubscribers map[chan EnvironmentTelemetry]struct{}
 
 	traceMu sync.Mutex
 	traces  map[uint32]chan TraceRoute
@@ -63,12 +67,51 @@ type TraceHop struct {
 	SNR  *float32
 }
 
+type Position struct {
+	Node          NodeRef
+	Latitude      float64
+	Longitude     float64
+	Altitude      *int32
+	AltitudeHAE   *int32
+	GroundSpeed   *uint32
+	GroundTrack   *uint32
+	SatsInView    uint32
+	PrecisionBits uint32
+	Timestamp     time.Time
+	ReceivedAt    time.Time
+}
+
+type EnvironmentTelemetry struct {
+	Node               NodeRef
+	Temperature        *float32
+	RelativeHumidity   *float32
+	BarometricPressure *float32
+	GasResistance      *float32
+	Voltage            *float32
+	Current            *float32
+	IAQ                *uint32
+	Distance           *float32
+	Lux                *float32
+	WhiteLux           *float32
+	IRLux              *float32
+	UVLux              *float32
+	WindDirection      *uint32
+	WindSpeed          *float32
+	WindGust           *float32
+	WindLull           *float32
+	Weight             *float32
+	Timestamp          time.Time
+	ReceivedAt         time.Time
+}
+
 type Node struct {
-	Num       uint32
-	ID        string
-	LongName  string
-	ShortName string
-	LastSeen  time.Time
+	Num         uint32
+	ID          string
+	LongName    string
+	ShortName   string
+	LastSeen    time.Time
+	Position    *Position
+	Environment *EnvironmentTelemetry
 }
 
 type NodeRef struct {
@@ -125,28 +168,36 @@ func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	m := &Mesh{
-		radio:       radio,
-		store:       cfg.Store,
-		ctx:         runCtx,
-		cancel:      cancel,
-		done:        make(chan struct{}),
-		nodes:       make(map[uint32]Node),
-		channels:    make(map[int32]Channel),
-		subscribers: make(map[chan Message]struct{}),
-		traces:      make(map[uint32]chan TraceRoute),
+		radio:                  radio,
+		store:                  cfg.Store,
+		ctx:                    runCtx,
+		cancel:                 cancel,
+		done:                   make(chan struct{}),
+		nodes:                  make(map[uint32]Node),
+		positions:              make(map[uint32]Position),
+		environments:           make(map[uint32]EnvironmentTelemetry),
+		channels:               make(map[int32]Channel),
+		subscribers:            make(map[chan Message]struct{}),
+		positionSubscribers:    make(map[chan Position]struct{}),
+		environmentSubscribers: make(map[chan EnvironmentTelemetry]struct{}),
+		traces:                 make(map[uint32]chan TraceRoute),
 	}
 
 	for _, channel := range radio.Channels() {
 		m.upsertChannel(convertChannel(channel))
 	}
 	for _, node := range radio.Nodes() {
-		m.upsertNode(Node{
+		meshNode := Node{
 			Num:       node.Num,
 			ID:        node.ID,
 			LongName:  node.LongName,
 			ShortName: node.ShortName,
 			LastSeen:  time.Now(),
-		})
+		}
+		m.upsertNode(meshNode)
+		if node.Position != nil {
+			m.upsertPosition(convertPosition(*node.Position, m.nodeRef))
+		}
 	}
 	if myNode := radio.MyNode(); myNode != nil {
 		m.myNode = myNode.Num
@@ -358,12 +409,64 @@ func (m *Mesh) Subscribe(buffer int) (<-chan Message, func()) {
 	return ch, cancel
 }
 
+func (m *Mesh) SubscribePositions(buffer int) (<-chan Position, func()) {
+	if buffer < 0 {
+		buffer = 0
+	}
+
+	ch := make(chan Position, buffer)
+	m.subsMu.Lock()
+	m.positionSubscribers[ch] = struct{}{}
+	m.subsMu.Unlock()
+
+	cancel := func() {
+		m.subsMu.Lock()
+		if _, ok := m.positionSubscribers[ch]; ok {
+			delete(m.positionSubscribers, ch)
+			close(ch)
+		}
+		m.subsMu.Unlock()
+	}
+
+	return ch, cancel
+}
+
+func (m *Mesh) SubscribeEnvironment(buffer int) (<-chan EnvironmentTelemetry, func()) {
+	if buffer < 0 {
+		buffer = 0
+	}
+
+	ch := make(chan EnvironmentTelemetry, buffer)
+	m.subsMu.Lock()
+	m.environmentSubscribers[ch] = struct{}{}
+	m.subsMu.Unlock()
+
+	cancel := func() {
+		m.subsMu.Lock()
+		if _, ok := m.environmentSubscribers[ch]; ok {
+			delete(m.environmentSubscribers, ch)
+			close(ch)
+		}
+		m.subsMu.Unlock()
+	}
+
+	return ch, cancel
+}
+
 func (m *Mesh) Messages(ctx context.Context) ([]Message, error) {
 	return m.store.Messages(ctx)
 }
 
 func (m *Mesh) Nodes(ctx context.Context) ([]Node, error) {
 	return m.store.Nodes(ctx)
+}
+
+func (m *Mesh) Positions(ctx context.Context) ([]Position, error) {
+	return m.store.Positions(ctx)
+}
+
+func (m *Mesh) EnvironmentTelemetries(ctx context.Context) ([]EnvironmentTelemetry, error) {
+	return m.store.EnvironmentTelemetries(ctx)
 }
 
 func (m *Mesh) Channels(ctx context.Context) ([]Channel, error) {
@@ -420,11 +523,24 @@ func (m *Mesh) handleEvent(event meshtasticapi.Event) {
 			LastSeen:  time.Now(),
 		}
 		m.upsertNode(node)
+		if event.Node.Position != nil {
+			m.upsertPosition(convertPosition(*event.Node.Position, m.nodeRef))
+		}
 	case meshtasticapi.EventChannel:
 		if event.Channel == nil {
 			return
 		}
 		m.upsertChannel(convertChannel(*event.Channel))
+	case meshtasticapi.EventPosition:
+		if event.Position == nil {
+			return
+		}
+		m.upsertPosition(convertPosition(*event.Position, m.nodeRef))
+	case meshtasticapi.EventEnvironment:
+		if event.Environment == nil {
+			return
+		}
+		m.upsertEnvironment(convertEnvironmentTelemetry(*event.Environment, m.nodeRef))
 	case meshtasticapi.EventTraceRoute:
 		if event.TraceRoute == nil {
 			return
@@ -510,10 +626,52 @@ func (m *Mesh) convertMessage(packet meshtasticapi.Packet) Message {
 
 func (m *Mesh) upsertNode(node Node) {
 	m.mu.Lock()
+	if position, ok := m.positions[node.Num]; ok && node.Position == nil {
+		node.Position = &position
+	}
+	if environment, ok := m.environments[node.Num]; ok && node.Environment == nil {
+		node.Environment = &environment
+	}
 	m.nodes[node.Num] = node
 	m.mu.Unlock()
 
 	_ = m.store.SaveNode(m.ctx, node)
+}
+
+func (m *Mesh) upsertPosition(position Position) {
+	if position.ReceivedAt.IsZero() {
+		position.ReceivedAt = time.Now()
+	}
+
+	m.mu.Lock()
+	m.positions[position.Node.Num] = position
+	if node, ok := m.nodes[position.Node.Num]; ok {
+		node.Position = &position
+		m.nodes[position.Node.Num] = node
+		_ = m.store.SaveNode(m.ctx, node)
+	}
+	m.mu.Unlock()
+
+	_ = m.store.SavePosition(m.ctx, position)
+	m.publishPosition(position)
+}
+
+func (m *Mesh) upsertEnvironment(environment EnvironmentTelemetry) {
+	if environment.ReceivedAt.IsZero() {
+		environment.ReceivedAt = time.Now()
+	}
+
+	m.mu.Lock()
+	m.environments[environment.Node.Num] = environment
+	if node, ok := m.nodes[environment.Node.Num]; ok {
+		node.Environment = &environment
+		m.nodes[environment.Node.Num] = node
+		_ = m.store.SaveNode(m.ctx, node)
+	}
+	m.mu.Unlock()
+
+	_ = m.store.SaveEnvironmentTelemetry(m.ctx, environment)
+	m.publishEnvironment(environment)
 }
 
 func (m *Mesh) upsertChannel(channel Channel) {
@@ -531,6 +689,30 @@ func (m *Mesh) publish(message Message) {
 	for ch := range m.subscribers {
 		select {
 		case ch <- message:
+		default:
+		}
+	}
+}
+
+func (m *Mesh) publishPosition(position Position) {
+	m.subsMu.RLock()
+	defer m.subsMu.RUnlock()
+
+	for ch := range m.positionSubscribers {
+		select {
+		case ch <- position:
+		default:
+		}
+	}
+}
+
+func (m *Mesh) publishEnvironment(environment EnvironmentTelemetry) {
+	m.subsMu.RLock()
+	defer m.subsMu.RUnlock()
+
+	for ch := range m.environmentSubscribers {
+		select {
+		case ch <- environment:
 		default:
 		}
 	}
@@ -564,6 +746,14 @@ func (m *Mesh) closeSubscribers() {
 	for ch := range m.subscribers {
 		close(ch)
 		delete(m.subscribers, ch)
+	}
+	for ch := range m.positionSubscribers {
+		close(ch)
+		delete(m.positionSubscribers, ch)
+	}
+	for ch := range m.environmentSubscribers {
+		close(ch)
+		delete(m.environmentSubscribers, ch)
 	}
 }
 
@@ -625,6 +815,47 @@ func convertTraceHops(nodes []uint32, snrs []int32, lookup func(uint32) NodeRef)
 		})
 	}
 	return hops
+}
+
+func convertPosition(position meshtasticapi.Position, lookup func(uint32) NodeRef) Position {
+	return Position{
+		Node:          lookup(position.NodeNum),
+		Latitude:      position.Latitude,
+		Longitude:     position.Longitude,
+		Altitude:      position.Altitude,
+		AltitudeHAE:   position.AltitudeHAE,
+		GroundSpeed:   position.GroundSpeed,
+		GroundTrack:   position.GroundTrack,
+		SatsInView:    position.SatsInView,
+		PrecisionBits: position.PrecisionBits,
+		Timestamp:     position.Timestamp,
+		ReceivedAt:    position.ReceivedAt,
+	}
+}
+
+func convertEnvironmentTelemetry(environment meshtasticapi.EnvironmentTelemetry, lookup func(uint32) NodeRef) EnvironmentTelemetry {
+	return EnvironmentTelemetry{
+		Node:               lookup(environment.NodeNum),
+		Temperature:        environment.Temperature,
+		RelativeHumidity:   environment.RelativeHumidity,
+		BarometricPressure: environment.BarometricPressure,
+		GasResistance:      environment.GasResistance,
+		Voltage:            environment.Voltage,
+		Current:            environment.Current,
+		IAQ:                environment.IAQ,
+		Distance:           environment.Distance,
+		Lux:                environment.Lux,
+		WhiteLux:           environment.WhiteLux,
+		IRLux:              environment.IRLux,
+		UVLux:              environment.UVLux,
+		WindDirection:      environment.WindDirection,
+		WindSpeed:          environment.WindSpeed,
+		WindGust:           environment.WindGust,
+		WindLull:           environment.WindLull,
+		Weight:             environment.Weight,
+		Timestamp:          environment.Timestamp,
+		ReceivedAt:         environment.ReceivedAt,
+	}
 }
 
 func (m *Mesh) nodeRef(num uint32) NodeRef {

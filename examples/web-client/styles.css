@@ -104,16 +104,52 @@ h2 {
   align-items: end;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--line);
+  background: #141a1f;
+}
+
+.tab {
+  min-height: 34px;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  color: var(--muted);
+}
+
+.tab.active {
+  border-color: var(--accent);
+  border-bottom-color: var(--panel);
+  background: var(--panel);
+  color: var(--text);
+}
+
 .layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
-  gap: 14px;
   padding: 14px;
-  height: calc(100vh - 70px);
+  height: calc(100vh - 113px);
+}
+
+.view {
+  display: none;
+  height: 100%;
+  min-height: 0;
+}
+
+.view.active {
+  display: block;
+}
+
+.split-view.active {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 14px;
 }
 
 .pane {
   min-width: 0;
+  height: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -171,13 +207,6 @@ h2 {
   border-top: 1px solid var(--line);
 }
 
-.side {
-  display: grid;
-  grid-template-rows: minmax(130px, 0.7fr) minmax(180px, 1fr) minmax(150px, 0.8fr);
-  gap: 14px;
-  min-height: 0;
-}
-
 .list {
   margin: 0;
   padding: 8px 12px 12px;
@@ -207,6 +236,219 @@ h2 {
   max-height: 100%;
 }
 
+.map-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.weather-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.weather-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  align-content: start;
+  gap: 12px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.weather-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #11171c;
+}
+
+.weather-card-header {
+  display: flex;
+  gap: 10px;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.weather-card h3 {
+  margin: 0;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.weather-card-header span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.weather-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.weather-metrics div {
+  min-width: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: #0d1115;
+}
+
+.weather-metrics dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.weather-metrics dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.empty-state {
+  display: grid;
+  place-items: center;
+  min-height: 180px;
+  color: var(--muted);
+}
+
+.map {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #0d1115;
+}
+
+.map-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--muted);
+}
+
+.mesh-marker {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 2px solid #081014;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #071014;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+.leaflet-container {
+  position: relative;
+  overflow: hidden;
+  background: #0d1115;
+  color: #1a1f24;
+}
+
+.leaflet-pane,
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-shadow,
+.leaflet-tile-container,
+.leaflet-pane > svg,
+.leaflet-pane > canvas,
+.leaflet-zoom-box,
+.leaflet-image-layer,
+.leaflet-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-shadow {
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.leaflet-tile {
+  filter: inherit;
+  visibility: hidden;
+}
+
+.leaflet-tile-loaded {
+  visibility: inherit;
+}
+
+.leaflet-zoom-animated {
+  transform-origin: 0 0;
+}
+
+.leaflet-map-pane,
+.leaflet-tile-pane,
+.leaflet-overlay-pane,
+.leaflet-shadow-pane,
+.leaflet-marker-pane,
+.leaflet-tooltip-pane,
+.leaflet-popup-pane {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.leaflet-marker-pane {
+  z-index: 600;
+}
+
+.leaflet-tile-pane {
+  z-index: 200;
+}
+
+.leaflet-overlay-pane {
+  z-index: 400;
+}
+
+.leaflet-popup-pane {
+  z-index: 700;
+}
+
+.leaflet-control-container .leaflet-top,
+.leaflet-control-container .leaflet-bottom {
+  position: absolute;
+  z-index: 1000;
+}
+
+.leaflet-top {
+  top: 0;
+}
+
+.leaflet-right {
+  right: 0;
+}
+
+.leaflet-bottom {
+  bottom: 0;
+}
+
+.leaflet-left {
+  left: 0;
+}
+
+.leaflet-container img {
+  max-width: none;
+}
+
+.leaflet-popup-content {
+  margin: 8px 10px;
+}
+
+.leaflet-popup-content strong {
+  display: block;
+  margin-bottom: 3px;
+}
+
 .trace-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -229,7 +471,7 @@ h2 {
 @media (max-width: 900px) {
   .topbar,
   .connect-form,
-  .layout {
+  .split-view.active {
     grid-template-columns: 1fr;
   }
 
@@ -239,10 +481,6 @@ h2 {
   }
 
   .layout {
-    height: auto;
-  }
-
-  .side {
-    grid-template-rows: auto;
+    height: calc(100vh - 155px);
   }
 }

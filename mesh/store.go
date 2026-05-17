@@ -9,23 +9,31 @@ import (
 type Store interface {
 	SaveMessage(context.Context, Message) error
 	SaveNode(context.Context, Node) error
+	SavePosition(context.Context, Position) error
+	SaveEnvironmentTelemetry(context.Context, EnvironmentTelemetry) error
 	SaveChannel(context.Context, Channel) error
 	Messages(context.Context) ([]Message, error)
 	Nodes(context.Context) ([]Node, error)
+	Positions(context.Context) ([]Position, error)
+	EnvironmentTelemetries(context.Context) ([]EnvironmentTelemetry, error)
 	Channels(context.Context) ([]Channel, error)
 }
 
 type MemoryStore struct {
-	mu       sync.RWMutex
-	messages []Message
-	nodes    map[uint32]Node
-	channels map[int32]Channel
+	mu           sync.RWMutex
+	messages     []Message
+	nodes        map[uint32]Node
+	positions    map[uint32]Position
+	environments map[uint32]EnvironmentTelemetry
+	channels     map[int32]Channel
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		nodes:    make(map[uint32]Node),
-		channels: make(map[int32]Channel),
+		nodes:        make(map[uint32]Node),
+		positions:    make(map[uint32]Position),
+		environments: make(map[uint32]EnvironmentTelemetry),
+		channels:     make(map[int32]Channel),
 	}
 }
 
@@ -44,7 +52,41 @@ func (s *MemoryStore) SaveNode(_ context.Context, node Node) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if position, ok := s.positions[node.Num]; ok && node.Position == nil {
+		node.Position = &position
+	}
+	if environment, ok := s.environments[node.Num]; ok && node.Environment == nil {
+		node.Environment = &environment
+	}
 	s.nodes[node.Num] = node
+	if node.Position != nil {
+		s.positions[node.Num] = *node.Position
+	}
+	if node.Environment != nil {
+		s.environments[node.Num] = *node.Environment
+	}
+	return nil
+}
+
+func (s *MemoryStore) SavePosition(_ context.Context, position Position) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if position.ReceivedAt.IsZero() {
+		position.ReceivedAt = time.Now()
+	}
+	s.positions[position.Node.Num] = position
+	return nil
+}
+
+func (s *MemoryStore) SaveEnvironmentTelemetry(_ context.Context, environment EnvironmentTelemetry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if environment.ReceivedAt.IsZero() {
+		environment.ReceivedAt = time.Now()
+	}
+	s.environments[environment.Node.Num] = environment
 	return nil
 }
 
@@ -74,6 +116,28 @@ func (s *MemoryStore) Nodes(_ context.Context) ([]Node, error) {
 		nodes = append(nodes, node)
 	}
 	return nodes, nil
+}
+
+func (s *MemoryStore) Positions(_ context.Context) ([]Position, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	positions := make([]Position, 0, len(s.positions))
+	for _, position := range s.positions {
+		positions = append(positions, position)
+	}
+	return positions, nil
+}
+
+func (s *MemoryStore) EnvironmentTelemetries(_ context.Context) ([]EnvironmentTelemetry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	environments := make([]EnvironmentTelemetry, 0, len(s.environments))
+	for _, environment := range s.environments {
+		environments = append(environments, environment)
+	}
+	return environments, nil
 }
 
 func (s *MemoryStore) Channels(_ context.Context) ([]Channel, error) {

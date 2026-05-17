@@ -91,6 +91,8 @@ DELETE /channels/{name}
 GET    /messages
 GET    /messages?channel=Primary
 POST   /messages
+GET    /positions
+GET    /telemetry/environment
 POST   /traceroute
 GET    /events
 GET    /events?channel=Primary
@@ -116,6 +118,21 @@ Watch live received messages with Server-Sent Events:
 
 ```bash
 curl -N http://127.0.0.1:8080/events
+```
+
+`/events` currently streams `message.received`, `position.updated`, and
+`environment.updated` events.
+
+List latest known node positions:
+
+```bash
+curl http://127.0.0.1:8080/positions
+```
+
+List latest known weather/environment telemetry:
+
+```bash
+curl http://127.0.0.1:8080/telemetry/environment
 ```
 
 Run traceroute:
@@ -237,7 +254,7 @@ route, err := meshNode.TraceRoute(ctx, mesh.TraceRouteOptions{
 fmt.Println(route.Towards)
 ```
 
-`mesh.MemoryStore` is the default storage backend. Implement `mesh.Store` to persist messages, nodes, and channels to SQLite or another database.
+`mesh.MemoryStore` is the default storage backend. Implement `mesh.Store` to persist messages, nodes, positions, environment telemetry, and channels to SQLite or another database.
 
 The repo includes a SQLite store:
 

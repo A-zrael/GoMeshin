@@ -3,8 +3,12 @@ const state = {
   events: null,
   channels: [],
   nodes: [],
+  environment: [],
   messages: [],
   selectedChannel: "Primary",
+  map: null,
+  markers: new Map(),
+  mapFitDone: false,
 };
 
 const els = {
@@ -17,6 +21,12 @@ const els = {
   sendForm: document.querySelector("#send-form"),
   messageText: document.querySelector("#message-text"),
   channels: document.querySelector("#channels"),
+  map: document.querySelector("#map"),
+  mapSummary: document.querySelector("#map-summary"),
+  fitMap: document.querySelector("#fit-map"),
+  weather: document.querySelector("#weather"),
+  weatherSummary: document.querySelector("#weather-summary"),
+  refreshWeather: document.querySelector("#refresh-weather"),
   nodes: document.querySelector("#nodes"),
   nodeSearch: document.querySelector("#node-search"),
   traceTarget: document.querySelector("#trace-target"),
@@ -27,6 +37,10 @@ const els = {
 };
 
 els.apiURL.value = state.apiURL;
+
+document.querySelectorAll(".tab").forEach((button) => {
+  button.addEventListener("click", () => activateTab(button.dataset.tab));
+});
 
 els.connectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -61,7 +75,9 @@ els.sendForm.addEventListener("submit", async (event) => {
 
 els.refreshChannels.addEventListener("click", loadChannels);
 els.refreshNodes.addEventListener("click", loadNodes);
+els.refreshWeather.addEventListener("click", loadWeather);
 els.nodeSearch.addEventListener("input", renderNodes);
+els.fitMap.addEventListener("click", () => fitMapToMarkers(true));
 
 els.traceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -91,7 +107,7 @@ async function connect() {
 
   try {
     await request("/health");
-    await Promise.all([loadChannels(), loadNodes(), loadMessages()]);
+    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather()]);
     openEvents();
     setStatus(`Connected to ${state.apiURL}`, "connected");
   } catch (error) {
@@ -110,6 +126,18 @@ async function loadChannels() {
 async function loadNodes() {
   state.nodes = await request("/nodes");
   renderNodes();
+  renderWeather();
+  renderMap();
+}
+
+async function loadWeather() {
+  state.environment = await request("/telemetry/environment");
+  for (const environment of state.environment) {
+    updateNodeEnvironment(environment);
+  }
+  renderWeather();
+  renderNodes();
+  renderMap();
 }
 
 async function loadMessages() {
@@ -128,6 +156,22 @@ function openEvents() {
       state.messages = state.messages.slice(-500);
     }
     renderMessages();
+  });
+
+  events.addEventListener("position.updated", (event) => {
+    const envelope = JSON.parse(event.data);
+    updateNodePosition(envelope.data);
+    renderNodes();
+    renderMap();
+  });
+
+  events.addEventListener("environment.updated", (event) => {
+    const envelope = JSON.parse(event.data);
+    upsertEnvironment(envelope.data);
+    updateNodeEnvironment(envelope.data);
+    renderWeather();
+    renderNodes();
+    renderMap();
   });
 
   events.onerror = () => {
@@ -215,6 +259,205 @@ function renderNodes() {
   }
 }
 
+function renderMap() {
+  const positions = state.nodes
+    .map((node) => ({ node, position: nodePosition(node) }))
+    .filter(({ position }) => hasLatLon(position));
+
+  els.mapSummary.textContent = `${positions.length} positions`;
+
+  if (!isMapTabActive()) {
+    return;
+  }
+
+  if (positions.length === 0) {
+    clearMapMarkers();
+    const empty = document.createElement("div");
+    empty.className = "map-empty";
+    empty.textContent = "No node positions yet.";
+    els.map.replaceChildren();
+    els.map.append(empty);
+    return;
+  }
+
+  ensureMap();
+  syncMapMarkers(positions);
+}
+
+function updateNodePosition(position) {
+  const num = nodeNum(position.node ?? position.Node ?? {});
+  if (!num) return;
+
+  const existing = state.nodes.find((node) => nodeNum(node) === num);
+  if (existing) {
+    existing.Position = position;
+    existing.position = position;
+    return;
+  }
+
+  const node = position.node ?? position.Node ?? {};
+  state.nodes.push({
+    Num: num,
+    ID: node.ID ?? node.id ?? "",
+    LongName: node.LongName ?? node.longName ?? "",
+    ShortName: node.ShortName ?? node.shortName ?? "",
+    Position: position,
+  });
+}
+
+function upsertEnvironment(environment) {
+  const num = nodeNum(environmentNode(environment));
+  if (!num) return;
+
+  const existingIndex = state.environment.findIndex((item) => nodeNum(environmentNode(item)) === num);
+  if (existingIndex >= 0) {
+    state.environment[existingIndex] = environment;
+    return;
+  }
+  state.environment.unshift(environment);
+}
+
+function updateNodeEnvironment(environment) {
+  const num = nodeNum(environmentNode(environment));
+  if (!num) return;
+
+  const existing = state.nodes.find((node) => nodeNum(node) === num);
+  if (existing) {
+    existing.Environment = environment;
+    existing.environment = environment;
+    return;
+  }
+
+  const node = environmentNode(environment);
+  state.nodes.push({
+    Num: num,
+    ID: node.ID ?? node.id ?? "",
+    LongName: node.LongName ?? node.longName ?? "",
+    ShortName: node.ShortName ?? node.shortName ?? "",
+    Environment: environment,
+  });
+}
+
+function ensureMap() {
+  if (state.map) {
+    return;
+  }
+  if (!window.L) {
+    els.map.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "map-empty";
+    empty.textContent = "Map library failed to load.";
+    els.map.append(empty);
+    return;
+  }
+
+  els.map.replaceChildren();
+  state.map = L.map(els.map, {
+    zoomControl: true,
+    attributionControl: true,
+  }).setView([0, 0], 2);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  }).addTo(state.map);
+}
+
+function syncMapMarkers(positions) {
+  if (!state.map) return;
+
+  const seen = new Set();
+  const bounds = [];
+  for (const { node, position } of positions) {
+    const num = nodeNum(node);
+    const key = String(num);
+    const lat = Number(positionLatitude(position));
+    const lon = Number(positionLongitude(position));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      continue;
+    }
+
+    seen.add(key);
+    bounds.push([lat, lon]);
+
+    const label = nodeShortName(node) || nodeLongName(node) || formatNodeID(num);
+    const popup = formatMapPopup(node, position);
+    const existing = state.markers.get(key);
+    if (existing) {
+      existing.setLatLng([lat, lon]);
+      existing.setIcon(nodeIcon(label));
+      existing.setPopupContent(popup);
+    } else {
+      state.markers.set(key, L.marker([lat, lon], { icon: nodeIcon(label) }).bindPopup(popup).addTo(state.map));
+    }
+  }
+
+  for (const [key, marker] of state.markers) {
+    if (!seen.has(key)) {
+      marker.remove();
+      state.markers.delete(key);
+    }
+  }
+
+  fitMapToMarkers(false);
+  setTimeout(() => state.map.invalidateSize(), 0);
+}
+
+function fitMapToMarkers(force) {
+  if (!state.map || state.markers.size === 0) return;
+  const bounds = [...state.markers.values()].map((marker) => marker.getLatLng());
+  if (bounds.length === 1) {
+    if (force || state.map.getZoom() < 10) {
+      state.map.setView(bounds[0], 13);
+    }
+    return;
+  }
+  if (force || !state.mapFitDone) {
+    state.map.fitBounds(bounds, { padding: [38, 38], maxZoom: 15 });
+    state.mapFitDone = true;
+  }
+}
+
+function nodeIcon(label) {
+  const initial = (label || "?").trim().slice(0, 1).toUpperCase() || "?";
+  return L.divIcon({
+    className: "",
+    html: `<div class="mesh-marker" title="${escapeHTML(label)}"><span>${escapeHTML(initial)}</span></div>`,
+    iconSize: [26, 26],
+    iconAnchor: [13, 13],
+    popupAnchor: [0, -13],
+  });
+}
+
+function clearMapMarkers() {
+  for (const marker of state.markers.values()) {
+    marker.remove();
+  }
+  state.markers.clear();
+}
+
+function activateTab(name) {
+  document.querySelectorAll(".tab").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === name);
+  });
+  document.querySelectorAll(".view").forEach((view) => {
+    view.classList.toggle("active", view.dataset.view === name);
+  });
+  if (name === "map") {
+    requestAnimationFrame(() => {
+      renderMap();
+      if (state.map) {
+        state.map.invalidateSize();
+        fitMapToMarkers(true);
+      }
+    });
+  }
+}
+
+function isMapTabActive() {
+  return document.querySelector('[data-view="map"]')?.classList.contains("active") ?? false;
+}
+
 function renderMessages() {
 	const channel = state.selectedChannel;
 	const messages = state.messages.filter((message) => displayChannel(channelName(messageChannel(message))) === channel);
@@ -241,6 +484,46 @@ function renderMessages() {
   els.messages.scrollTop = els.messages.scrollHeight;
 }
 
+function renderWeather() {
+  const environments = latestEnvironment();
+  els.weatherSummary.textContent = `${environments.length} stations`;
+  els.weather.replaceChildren();
+
+  if (environments.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No weather telemetry yet.";
+    els.weather.append(empty);
+    return;
+  }
+
+  for (const environment of environments) {
+    const card = document.createElement("article");
+    card.className = "weather-card";
+
+    const header = document.createElement("div");
+    header.className = "weather-card-header";
+    const title = document.createElement("h3");
+    title.textContent = formatEnvironmentNode(environment);
+    const time = document.createElement("span");
+    time.textContent = formatTime(environment.receivedAt ?? environment.ReceivedAt);
+    header.append(title, time);
+
+    const metrics = document.createElement("dl");
+    metrics.className = "weather-metrics";
+    appendMetric(metrics, "Temp", formatMaybeNumber(environmentTemperature(environment), "C", 1));
+    appendMetric(metrics, "Humidity", formatMaybeNumber(environmentHumidity(environment), "%", 1));
+    appendMetric(metrics, "Pressure", formatMaybeNumber(environmentPressure(environment), "hPa", 1));
+    appendMetric(metrics, "Wind", formatWind(environment));
+    appendMetric(metrics, "Light", formatMaybeNumber(environmentLux(environment), "lx", 1));
+    appendMetric(metrics, "Voltage", formatMaybeNumber(environmentVoltage(environment), "V", 2));
+    appendMetric(metrics, "IAQ", formatMaybeInteger(environmentIAQ(environment)));
+
+    card.append(header, metrics);
+    els.weather.append(card);
+  }
+}
+
 function activeChannels(channels) {
 	const active = channels.filter((channel) => channelRole(channel) !== "DISABLED");
 	return active.length ? active : [{ index: 0, name: "Primary", role: "PRIMARY" }];
@@ -259,7 +542,114 @@ function formatNode(node) {
 	const nodeID = formatNodeID(nodeNum(node));
 	const longName = nodeLongName(node);
 	const name = nodeShortName(node) || longName || "(unnamed)";
-	return longName && longName !== name ? `${nodeID}  ${name}  ${longName}` : `${nodeID}  ${name}`;
+	const base = longName && longName !== name ? `${nodeID}  ${name}  ${longName}` : `${nodeID}  ${name}`;
+	const position = nodePosition(node);
+	const environment = nodeEnvironment(node);
+	const parts = [base];
+	if (position) {
+		parts.push(formatLatLon(position));
+	}
+	if (environment) {
+		const summary = formatEnvironmentSummary(environment);
+		if (summary) {
+			parts.push(summary);
+		}
+	}
+	return parts.join("  ");
+}
+
+function latestEnvironment() {
+  const byNode = new Map();
+  for (const node of state.nodes) {
+    const environment = nodeEnvironment(node);
+    if (environment) {
+      byNode.set(nodeNum(environmentNode(environment)) || nodeNum(node), environment);
+    }
+  }
+  for (const environment of state.environment) {
+    const num = nodeNum(environmentNode(environment));
+    if (num) {
+      byNode.set(num, environment);
+    }
+  }
+  return [...byNode.values()].sort((left, right) => {
+    const leftTime = Date.parse(left.receivedAt ?? left.ReceivedAt ?? "") || 0;
+    const rightTime = Date.parse(right.receivedAt ?? right.ReceivedAt ?? "") || 0;
+    return rightTime - leftTime;
+  });
+}
+
+function appendMetric(parent, label, value) {
+  const row = document.createElement("div");
+  const term = document.createElement("dt");
+  const detail = document.createElement("dd");
+  term.textContent = label;
+  detail.textContent = value || "-";
+  row.append(term, detail);
+  parent.append(row);
+}
+
+function formatMapPopup(node, position) {
+  const num = nodeNum(node);
+  const label = nodeShortName(node) || nodeLongName(node) || formatNodeID(num);
+  const weather = formatEnvironmentSummary(nodeEnvironment(node));
+  const lines = [
+    `<strong>${escapeHTML(label)}</strong>${escapeHTML(formatNodeID(num))}`,
+    escapeHTML(formatLatLon(position)),
+  ];
+  if (weather) {
+    lines.push(escapeHTML(weather));
+  }
+  return lines.join("<br>");
+}
+
+function formatEnvironmentNode(environment) {
+  const node = environmentNode(environment);
+  const num = nodeNum(node);
+  return nodeShortName(node) || nodeLongName(node) || formatNodeID(num);
+}
+
+function formatEnvironmentSummary(environment) {
+  if (!environment) return "";
+  const parts = [];
+  const temp = environmentTemperature(environment);
+  const humidity = environmentHumidity(environment);
+  const wind = environmentWindSpeed(environment);
+  if (temp !== null) parts.push(`${Number(temp).toFixed(1)}C`);
+  if (humidity !== null) parts.push(`${Number(humidity).toFixed(0)}% RH`);
+  if (wind !== null) parts.push(`${Number(wind).toFixed(1)}m/s wind`);
+  return parts.join("  ");
+}
+
+function formatWind(environment) {
+  const speed = environmentWindSpeed(environment);
+  if (speed === null) return "-";
+  const direction = environmentWindDirection(environment);
+  if (direction === null) {
+    return `${Number(speed).toFixed(1)} m/s`;
+  }
+  return `${Number(speed).toFixed(1)} m/s @ ${Number(direction).toFixed(0)}deg`;
+}
+
+function formatMaybeNumber(value, suffix, digits) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+    return "-";
+  }
+  return `${Number(value).toFixed(digits)} ${suffix}`;
+}
+
+function formatMaybeInteger(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+    return "-";
+  }
+  return Number(value).toFixed(0);
+}
+
+function formatTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString();
 }
 
 function nodeMatches(node, query) {
@@ -328,6 +718,77 @@ function nodeShortName(node = {}) {
 
 function nodeLongName(node = {}) {
 	return node.longName ?? node.LongName ?? "";
+}
+
+function nodePosition(node = {}) {
+	return node.position ?? node.Position ?? null;
+}
+
+function nodeEnvironment(node = {}) {
+	return node.environment ?? node.Environment ?? null;
+}
+
+function environmentNode(environment = {}) {
+	return environment.node ?? environment.Node ?? {};
+}
+
+function environmentTemperature(environment = {}) {
+	return environment.temperature ?? environment.Temperature ?? null;
+}
+
+function environmentHumidity(environment = {}) {
+	return environment.relativeHumidity ?? environment.RelativeHumidity ?? null;
+}
+
+function environmentPressure(environment = {}) {
+	return environment.barometricPressure ?? environment.BarometricPressure ?? null;
+}
+
+function environmentWindSpeed(environment = {}) {
+	return environment.windSpeed ?? environment.WindSpeed ?? null;
+}
+
+function environmentWindDirection(environment = {}) {
+	return environment.windDirection ?? environment.WindDirection ?? null;
+}
+
+function environmentLux(environment = {}) {
+	return environment.lux ?? environment.Lux ?? null;
+}
+
+function environmentVoltage(environment = {}) {
+	return environment.voltage ?? environment.Voltage ?? null;
+}
+
+function environmentIAQ(environment = {}) {
+	return environment.iaq ?? environment.IAQ ?? null;
+}
+
+function positionLatitude(position) {
+	if (!position) {
+		return null;
+	}
+	return position.latitude ?? position.Latitude ?? null;
+}
+
+function positionLongitude(position) {
+	if (!position) {
+		return null;
+	}
+	return position.longitude ?? position.Longitude ?? null;
+}
+
+function hasLatLon(position) {
+  return positionLatitude(position) !== null && positionLongitude(position) !== null;
+}
+
+function formatLatLon(position) {
+	const lat = positionLatitude(position);
+	const lon = positionLongitude(position);
+	if (lat === null || lon === null) {
+		return "";
+	}
+	return `${Number(lat).toFixed(6)}, ${Number(lon).toFixed(6)}`;
 }
 
 function formatNodeID(num) {

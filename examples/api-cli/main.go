@@ -62,6 +62,8 @@ func main() {
 	wantAck := flag.Bool("ack", false, "request an ACK when sending")
 	listen := flag.Bool("listen", false, "listen for live messages")
 	listNodes := flag.Bool("nodes", false, "list known nodes")
+	listPositions := flag.Bool("positions", false, "list latest known node positions")
+	listEnvironment := flag.Bool("weather", false, "list latest known environment telemetry")
 	listChannels := flag.Bool("channels", false, "list known channels")
 	listMessages := flag.Bool("messages", false, "list stored messages")
 	traceTo := flag.String("traceroute", "", "run traceroute to node like !12345678")
@@ -79,6 +81,10 @@ func main() {
 	switch {
 	case *listNodes:
 		mustPrintNodes(ctx, api)
+	case *listPositions:
+		mustPrintPositions(ctx, api)
+	case *listEnvironment:
+		mustPrintEnvironment(ctx, api)
 	case *listChannels:
 		mustPrintChannels(ctx, api)
 	case *listMessages:
@@ -88,7 +94,7 @@ func main() {
 	case *traceTo != "":
 		mustTraceRoute(ctx, api, *traceTo, *channel, *timeout)
 	case *listen:
-		if err := api.listen(ctx, *channel, printLiveMessage); err != nil && ctx.Err() == nil {
+		if err := api.listen(ctx, *channel, printLiveMessage, printLivePosition, printLiveEnvironment); err != nil && ctx.Err() == nil {
 			log.Fatal(err)
 		}
 	default:
@@ -128,6 +134,40 @@ func mustPrintNodes(ctx context.Context, api *client) {
 	}
 	for _, node := range nodes {
 		fmt.Printf("!%08x  %-8s  %s\n", node.Num, node.ShortName, node.LongName)
+	}
+}
+
+func mustPrintPositions(ctx context.Context, api *client) {
+	var positions []mesh.Position
+	if err := api.doJSON(ctx, http.MethodGet, "/positions", nil, &positions); err != nil {
+		log.Fatal(err)
+	}
+	for _, position := range positions {
+		name := position.Node.ShortName
+		if name == "" {
+			name = position.Node.LongName
+		}
+		if name == "" {
+			name = "(unnamed)"
+		}
+		fmt.Printf("!%08x  %-8s  %.7f,%.7f", position.Node.Num, name, position.Latitude, position.Longitude)
+		if position.Altitude != nil {
+			fmt.Printf(" alt=%dm", *position.Altitude)
+		}
+		if position.SatsInView != 0 {
+			fmt.Printf(" sats=%d", position.SatsInView)
+		}
+		fmt.Println()
+	}
+}
+
+func mustPrintEnvironment(ctx context.Context, api *client) {
+	var environments []mesh.EnvironmentTelemetry
+	if err := api.doJSON(ctx, http.MethodGet, "/telemetry/environment", nil, &environments); err != nil {
+		log.Fatal(err)
+	}
+	for _, environment := range environments {
+		printEnvironment(environment)
 	}
 }
 
@@ -216,7 +256,7 @@ func (c *client) doJSON(ctx context.Context, method string, path string, body in
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
-func (c *client) listen(ctx context.Context, channel string, handle func(mesh.Message)) error {
+func (c *client) listen(ctx context.Context, channel string, handleMessage func(mesh.Message), handlePosition func(mesh.Position), handleEnvironment func(mesh.EnvironmentTelemetry)) error {
 	path := "/events"
 	if channel != "" {
 		path += "?channel=" + url.QueryEscape(channel)
@@ -247,7 +287,7 @@ func (c *client) listen(ctx context.Context, channel string, handle func(mesh.Me
 		switch {
 		case line == "":
 			if data.Len() > 0 {
-				if err := deliverEvent(eventType, data.String(), handle); err != nil {
+				if err := deliverEvent(eventType, data.String(), handleMessage, handlePosition, handleEnvironment); err != nil {
 					return err
 				}
 				eventType = ""
@@ -265,8 +305,8 @@ func (c *client) listen(ctx context.Context, channel string, handle func(mesh.Me
 	return scanner.Err()
 }
 
-func deliverEvent(eventType string, data string, handle func(mesh.Message)) error {
-	if eventType != "" && eventType != "message.received" {
+func deliverEvent(eventType string, data string, handleMessage func(mesh.Message), handlePosition func(mesh.Position), handleEnvironment func(mesh.EnvironmentTelemetry)) error {
+	if eventType != "" && eventType != "message.received" && eventType != "position.updated" && eventType != "environment.updated" {
 		return nil
 	}
 
@@ -274,20 +314,82 @@ func deliverEvent(eventType string, data string, handle func(mesh.Message)) erro
 	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
 		return err
 	}
-	if envelope.Type != "message.received" {
+	switch envelope.Type {
+	case "message.received":
+		var message mesh.Message
+		if err := json.Unmarshal(envelope.Data, &message); err != nil {
+			return err
+		}
+		handleMessage(message)
+	case "position.updated":
+		var position mesh.Position
+		if err := json.Unmarshal(envelope.Data, &position); err != nil {
+			return err
+		}
+		handlePosition(position)
+	case "environment.updated":
+		var environment mesh.EnvironmentTelemetry
+		if err := json.Unmarshal(envelope.Data, &environment); err != nil {
+			return err
+		}
+		handleEnvironment(environment)
+	default:
 		return nil
 	}
-
-	var message mesh.Message
-	if err := json.Unmarshal(envelope.Data, &message); err != nil {
-		return err
-	}
-	handle(message)
 	return nil
 }
 
 func printLiveMessage(message mesh.Message) {
 	printMessage(message)
+}
+
+func printLivePosition(position mesh.Position) {
+	name := position.Node.ShortName
+	if name == "" {
+		name = position.Node.LongName
+	}
+	if name == "" {
+		name = "(unnamed)"
+	}
+	fmt.Printf("[position] !%08x %s %.7f,%.7f\n", position.Node.Num, name, position.Latitude, position.Longitude)
+}
+
+func printLiveEnvironment(environment mesh.EnvironmentTelemetry) {
+	fmt.Print("[weather] ")
+	printEnvironment(environment)
+}
+
+func printEnvironment(environment mesh.EnvironmentTelemetry) {
+	name := environment.Node.ShortName
+	if name == "" {
+		name = environment.Node.LongName
+	}
+	if name == "" {
+		name = "(unnamed)"
+	}
+	fmt.Printf("!%08x %-8s", environment.Node.Num, name)
+	if environment.Temperature != nil {
+		fmt.Printf(" temp=%.1fC", *environment.Temperature)
+	}
+	if environment.RelativeHumidity != nil {
+		fmt.Printf(" humidity=%.1f%%", *environment.RelativeHumidity)
+	}
+	if environment.BarometricPressure != nil {
+		fmt.Printf(" pressure=%.1fhPa", *environment.BarometricPressure)
+	}
+	if environment.WindSpeed != nil {
+		fmt.Printf(" wind=%.1fm/s", *environment.WindSpeed)
+	}
+	if environment.WindDirection != nil {
+		fmt.Printf("@%ddeg", *environment.WindDirection)
+	}
+	if environment.Lux != nil {
+		fmt.Printf(" lux=%.1f", *environment.Lux)
+	}
+	if environment.Voltage != nil {
+		fmt.Printf(" voltage=%.2fV", *environment.Voltage)
+	}
+	fmt.Println()
 }
 
 func printMessage(message mesh.Message) {

@@ -144,6 +144,8 @@ func (s *apiServer) routes() http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/messages", s.handleMessages)
 	mux.HandleFunc("/nodes", s.handleNodes)
+	mux.HandleFunc("/positions", s.handlePositions)
+	mux.HandleFunc("/telemetry/environment", s.handleEnvironmentTelemetry)
 	mux.HandleFunc("/channels", s.handleChannels)
 	mux.HandleFunc("/channels/", s.handleChannel)
 	mux.HandleFunc("/traceroute", s.handleTraceRoute)
@@ -256,6 +258,30 @@ func (s *apiServer) handleNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nodes)
 }
 
+func (s *apiServer) handlePositions(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	positions, err := s.mesh.Positions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, positions)
+}
+
+func (s *apiServer) handleEnvironmentTelemetry(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	environments, err := s.mesh.EnvironmentTelemetries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, environments)
+}
+
 func (s *apiServer) handleChannels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -344,6 +370,10 @@ func (s *apiServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	messages, unsubscribe := s.mesh.Subscribe(64)
 	defer unsubscribe()
+	positions, unsubscribePositions := s.mesh.SubscribePositions(64)
+	defer unsubscribePositions()
+	environments, unsubscribeEnvironments := s.mesh.SubscribeEnvironment(64)
+	defer unsubscribeEnvironments()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -373,6 +403,30 @@ func (s *apiServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 				Type: "message.received",
 				Time: time.Now(),
 				Data: message,
+			}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case position, ok := <-positions:
+			if !ok {
+				return
+			}
+			if err := writeSSE(w, "position.updated", eventEnvelope{
+				Type: "position.updated",
+				Time: time.Now(),
+				Data: position,
+			}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case environment, ok := <-environments:
+			if !ok {
+				return
+			}
+			if err := writeSSE(w, "environment.updated", eventEnvelope{
+				Type: "environment.updated",
+				Time: time.Now(),
+				Data: environment,
 			}); err != nil {
 				return
 			}
