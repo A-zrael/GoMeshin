@@ -20,7 +20,128 @@ Listen for messages:
 go run . -port /dev/ttyUSB0
 ```
 
-The Bubble Tea TUI example lives in `examples/api-check`.
+Examples:
+
+- `examples/api-check`: Bubble Tea TUI that talks to `gomeshind`.
+- `examples/api-cli`: small command-line client that talks to `gomeshind`.
+- `examples/web-client`: static HTML browser client that talks to `gomeshind`.
+
+## Daemon API
+
+`cmd/gomeshind` runs GoMeshin as a long-lived local service. It owns the serial
+connection, keeps the SQLite store open, and exposes a JSON API for CLI tools,
+TUIs, web UIs, scripts, and other clients.
+
+Run it directly while developing:
+
+```bash
+go run ./cmd/gomeshind \
+  -port /dev/ttyUSB0 \
+  -db gomeshin.db \
+  -listen 127.0.0.1:8080
+```
+
+Use a Unix socket instead of a TCP port:
+
+```bash
+go run ./cmd/gomeshind \
+  -port /dev/ttyUSB0 \
+  -db gomeshin.db \
+  -unix /tmp/gomeshind.sock
+```
+
+Serve the web client from the daemon:
+
+```bash
+go run ./cmd/gomeshind \
+  -port /dev/ttyUSB0 \
+  -db gomeshin.db \
+  -listen 127.0.0.1:8080 \
+  -web-dir examples/web-client
+```
+
+Or run the browser example as a separate web server:
+
+```bash
+go run ./cmd/gomeshind \
+  -port /dev/ttyUSB0 \
+  -db gomeshin.db \
+  -listen 127.0.0.1:8080 \
+  -cors-origin http://127.0.0.1:8090
+```
+
+Then, in another terminal:
+
+```bash
+cd examples/web-client
+python3 -m http.server 8090 --bind 127.0.0.1
+```
+
+Open `http://127.0.0.1:8090` and keep the API field set to
+`http://127.0.0.1:8080`.
+
+Useful endpoints:
+
+```text
+GET    /health
+GET    /nodes
+GET    /channels
+POST   /channels
+DELETE /channels/{name}
+GET    /messages
+GET    /messages?channel=Primary
+POST   /messages
+POST   /traceroute
+GET    /events
+GET    /events?channel=Primary
+```
+
+Send a message:
+
+```bash
+curl -X POST http://127.0.0.1:8080/messages \
+  -H 'content-type: application/json' \
+  -d '{"channel":"Primary","text":"hello mesh"}'
+```
+
+Send to a specific node:
+
+```bash
+curl -X POST http://127.0.0.1:8080/messages \
+  -H 'content-type: application/json' \
+  -d '{"to":"!12345678","channel":"Primary","text":"direct hello","wantAck":true}'
+```
+
+Watch live received messages with Server-Sent Events:
+
+```bash
+curl -N http://127.0.0.1:8080/events
+```
+
+Run traceroute:
+
+```bash
+curl -X POST http://127.0.0.1:8080/traceroute \
+  -H 'content-type: application/json' \
+  -d '{"to":"!12345678","channel":"Primary","hopLimit":3,"timeoutSeconds":90}'
+```
+
+Add and remove a secondary channel:
+
+```bash
+curl -X POST http://127.0.0.1:8080/channels \
+  -H 'content-type: application/json' \
+  -d '{"name":"ops"}'
+
+curl -X DELETE http://127.0.0.1:8080/channels/ops
+```
+
+For browser clients served from a different port or host, `-cors-origin` must be
+the web page origin, not the daemon API URL. For example, if the page is loaded
+from `http://127.0.0.1:8090` and calls `http://127.0.0.1:8080`, use
+`-cors-origin http://127.0.0.1:8090`. Multiple origins can be comma-separated.
+Keep the daemon bound to `127.0.0.1` unless you deliberately want other machines
+on the network to reach it.
 
 List configured channels:
 

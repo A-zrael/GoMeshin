@@ -13,7 +13,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"meshin/mesh"
-	"meshin/mesh/sqlitestore"
 )
 
 type rxMsg mesh.Message
@@ -50,10 +49,11 @@ const (
 	modeNodes
 	modeChannels
 	modeTools
+	modeTraceTarget
 )
 
 type model struct {
-	mesh        *mesh.Mesh
+	api         *apiClient
 	rx          <-chan mesh.Message
 	input       textinput.Model
 	history     []mesh.Message
@@ -64,6 +64,7 @@ type model struct {
 	menu        int
 	channelMenu int
 	node        int
+	tracePick   int
 	trace       *mesh.TraceRoute
 	status      string
 	width       int
@@ -78,61 +79,50 @@ var (
 )
 
 func main() {
-	port := flag.String("port", "/dev/ttyUSB0", "serial port connected to the Meshtastic radio")
-	baud := flag.Int("baud", 115200, "serial baud rate")
-	dbPath := flag.String("db", "gomeshin-api-check.db", "SQLite database path")
+	apiURL := flag.String("api", "http://127.0.0.1:8080", "gomeshind API base URL")
 	flag.Parse()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	client, err := newAPIClient(*apiURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store, err := sqlitestore.Open(ctx, *dbPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer store.Close()
+	messages := client.Events(ctx)
 
-	node, err := mesh.Open(ctx, mesh.Config{
-		Port:  *port,
-		Baud:  *baud,
-		Store: store,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer node.Close()
+	loadCtx, loadCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer loadCancel()
 
-	messages, unsubscribe := node.Subscribe(128)
-	defer unsubscribe()
-
-	program := tea.NewProgram(newModel(ctx, node, messages, *dbPath), tea.WithAltScreen())
+	program := tea.NewProgram(newModel(loadCtx, client, messages, *apiURL), tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func newModel(ctx context.Context, node *mesh.Mesh, messages <-chan mesh.Message, dbPath string) model {
+func newModel(ctx context.Context, api *apiClient, messages <-chan mesh.Message, apiURL string) model {
 	input := textinput.New()
 	input.Placeholder = "message"
 	input.Prompt = "> "
 	input.Focus()
 
-	channels, err := node.Channels(ctx)
+	channels, err := api.Channels(ctx)
 	if err != nil || len(channels) == 0 {
 		channels = []mesh.Channel{{Index: 0, Name: "Primary", Role: "PRIMARY"}}
 	}
 	channels = activeChannels(channels)
-	nodes, _ := node.Nodes(ctx)
-	history, _ := node.Messages(ctx)
+	nodes, _ := api.Nodes(ctx)
+	history, _ := api.Messages(ctx)
 
 	return model{
-		mesh:     node,
+		api:      api,
 		rx:       messages,
 		input:    input,
 		history:  history,
 		channels: channels,
 		nodes:    nodes,
-		status:   fmt.Sprintf("connected db=%s", dbPath),
+		status:   fmt.Sprintf("connected api=%s", apiURL),
 	}
 }
 
@@ -154,15 +144,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "esc":
-			if m.mode != modeChat {
+			switch m.mode {
+			case modeTraceTarget:
+				m.mode = modeTools
+				m.input.SetValue("")
+				m.input.Placeholder = "message"
+				m.status = "tools"
+			case modeAddChannel:
+				m.mode = modeChannelMenu
+				m.input.SetValue("")
+				m.input.Placeholder = "message"
+				m.status = "channel menu"
+			case modeMainMenu, modeChannelMenu, modeNodes, modeChannels, modeTools:
 				m.mode = modeChat
 				m.input.Placeholder = "message"
 				m.input.SetValue("")
 				m.status = "connected"
-				break
+			default:
+				m.mode = modeMainMenu
+				m.status = "menu"
 			}
-			m.mode = modeMainMenu
-			m.status = "menu"
 		case "tab":
 			if m.mode == modeChat {
 				m.nextChannel()
@@ -185,7 +186,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				channel := m.currentChannel()
 				m.input.SetValue("")
 				m.status = "sending"
-				cmds = append(cmds, sendText(m.mesh, channel.Name, text))
+				cmds = append(cmds, sendText(m.api, channel.Name, text))
 			case modeMainMenu:
 				switch m.menu {
 				case 0:
@@ -194,7 +195,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case 1:
 					m.mode = modeNodes
 					m.status = "nodes"
-					cmds = append(cmds, loadNodes(m.mesh))
+					cmds = append(cmds, loadNodes(m.api))
 				case 2:
 					m.mode = modeChannels
 					m.status = "channels"
@@ -217,7 +218,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					channel := m.currentChannel()
 					m.mode = modeChat
 					m.status = "removing channel"
-					cmds = append(cmds, removeChannel(m.mesh, channel.Name))
+					cmds = append(cmds, removeChannel(m.api, channel.Name))
 				}
 			case modeAddChannel:
 				if text == "" {
@@ -227,18 +228,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Placeholder = "message"
 				m.mode = modeChat
 				m.status = "adding channel"
-				cmds = append(cmds, addChannel(m.mesh, text))
+				cmds = append(cmds, addChannel(m.api, text))
 			case modeTools:
-				node := m.currentNode()
+				m.mode = modeTraceTarget
+				m.tracePick = 0
+				m.input.SetValue("")
+				m.input.Placeholder = "search node"
+				m.status = "select traceroute target"
+				cmds = append(cmds, loadNodes(m.api))
+			case modeTraceTarget:
+				node := m.currentTraceNode()
 				if node.Num == 0 {
 					m.status = "no node selected"
 					break
 				}
+				m.node = m.nodeIndex(node.Num)
+				m.mode = modeTools
+				m.input.SetValue("")
+				m.input.Placeholder = "message"
 				m.status = "sending traceroute"
-				cmds = append(cmds, traceRoute(m.mesh, node.Num, m.currentChannel().Name))
+				cmds = append(cmds, traceRoute(m.api, node.Num, m.currentChannel().Name))
 			}
 		default:
-			handled = m.mode != modeChat && m.mode != modeAddChannel
+			handled = m.mode != modeChat && m.mode != modeAddChannel && m.mode != modeTraceTarget
 		}
 		if handled {
 			return m, tea.Batch(cmds...)
@@ -280,12 +292,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.node >= len(m.nodes) {
 				m.node = max(0, len(m.nodes)-1)
 			}
+			filtered := m.filteredTraceNodes()
+			if m.tracePick >= len(filtered) {
+				m.tracePick = max(0, len(filtered)-1)
+			}
 			m.status = fmt.Sprintf("nodes: %d", len(m.nodes))
 		}
 	}
 
 	var cmd tea.Cmd
+	previousInput := m.input.Value()
 	m.input, cmd = m.input.Update(msg)
+	if m.mode == modeTraceTarget {
+		if m.input.Value() != previousInput {
+			m.tracePick = 0
+		}
+		filtered := m.filteredTraceNodes()
+		if m.tracePick >= len(filtered) {
+			m.tracePick = max(0, len(filtered)-1)
+		}
+	}
 	cmds = append(cmds, cmd)
 
 	return m, tea.Batch(cmds...)
@@ -331,6 +357,8 @@ func renderBody(m model, height int, width int) string {
 		return renderChannels(m, height)
 	case modeTools:
 		return renderTools(m, height)
+	case modeTraceTarget:
+		return renderTraceTarget(m, height, width)
 	default:
 		return renderMessages(m.history, m.currentChannel().Name, height, width)
 	}
@@ -420,14 +448,14 @@ func renderTools(m model, height int) string {
 	node := m.currentNode()
 	target := "no node selected"
 	if node.Num != 0 {
-		target = fmt.Sprintf("!%08x %s", node.Num, node.ShortName)
+		target = formatNode(node)
 	}
 	lines := []string{
 		accentStyle.Render("Tools"),
 		"Traceroute",
 		"  target: " + target,
 		"",
-		mutedStyle.Render("up/down select node  enter run traceroute  esc close"),
+		mutedStyle.Render("enter select/search target  esc close"),
 	}
 	if m.trace != nil {
 		lines = append(lines, "", accentStyle.Render("Last traceroute"))
@@ -442,14 +470,53 @@ func renderTools(m model, height int) string {
 	return strings.Join(lines[:min(len(lines), height)], "\n")
 }
 
+func renderTraceTarget(m model, height int, width int) string {
+	filtered := m.filteredTraceNodes()
+	lines := []string{
+		accentStyle.Render("Traceroute target"),
+		mutedStyle.Render("type to search  up/down move  enter run  esc back"),
+		"",
+	}
+
+	if len(filtered) == 0 {
+		lines = append(lines, "No matching nodes.")
+	} else {
+		available := max(1, height-len(lines))
+		start := 0
+		if m.tracePick >= available {
+			start = m.tracePick - available + 1
+		}
+		end := min(len(filtered), start+available)
+		for index := start; index < end; index++ {
+			item := filtered[index]
+			prefix := "  "
+			if index == m.tracePick {
+				prefix = "> "
+			}
+			line := prefix + formatNode(item.node)
+			if len(line) > width && width > 3 {
+				line = line[:width-3] + "..."
+			}
+			lines = append(lines, line)
+		}
+	}
+
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:min(len(lines), height)], "\n")
+}
+
 func (m *model) moveSelection(delta int) {
 	switch m.mode {
 	case modeMainMenu:
 		m.menu = wrapIndex(m.menu+delta, len(mainMenuItems()))
 	case modeChannelMenu:
 		m.channelMenu = wrapIndex(m.channelMenu+delta, len(channelMenuItems()))
-	case modeNodes, modeTools:
+	case modeNodes:
 		m.node = wrapIndex(m.node+delta, len(m.nodes))
+	case modeTraceTarget:
+		m.tracePick = wrapIndex(m.tracePick+delta, len(m.filteredTraceNodes()))
 	}
 }
 
@@ -501,6 +568,62 @@ func (m model) currentNode() mesh.Node {
 	return m.nodes[m.node]
 }
 
+type traceNodeItem struct {
+	node mesh.Node
+}
+
+func (m model) filteredTraceNodes() []traceNodeItem {
+	query := strings.ToLower(strings.TrimSpace(m.input.Value()))
+	items := make([]traceNodeItem, 0, len(m.nodes))
+	for _, node := range m.nodes {
+		if node.Num == 0 {
+			continue
+		}
+		if query == "" || nodeMatches(node, query) {
+			items = append(items, traceNodeItem{node: node})
+		}
+	}
+	return items
+}
+
+func (m model) currentTraceNode() mesh.Node {
+	filtered := m.filteredTraceNodes()
+	if len(filtered) == 0 || m.tracePick < 0 || m.tracePick >= len(filtered) {
+		return mesh.Node{}
+	}
+	return filtered[m.tracePick].node
+}
+
+func (m model) nodeIndex(num uint32) int {
+	for index, node := range m.nodes {
+		if node.Num == num {
+			return index
+		}
+	}
+	return m.node
+}
+
+func nodeMatches(node mesh.Node, query string) bool {
+	return strings.Contains(strings.ToLower(node.ShortName), query) ||
+		strings.Contains(strings.ToLower(node.LongName), query) ||
+		strings.Contains(strings.ToLower(fmt.Sprintf("!%08x", node.Num)), query) ||
+		strings.Contains(strings.ToLower(fmt.Sprintf("%08x", node.Num)), query)
+}
+
+func formatNode(node mesh.Node) string {
+	name := node.ShortName
+	if name == "" {
+		name = node.LongName
+	}
+	if name == "" {
+		name = "(unnamed)"
+	}
+	if node.LongName != "" && node.LongName != name {
+		return fmt.Sprintf("!%08x  %-8s  %s", node.Num, name, node.LongName)
+	}
+	return fmt.Sprintf("!%08x  %s", node.Num, name)
+}
+
 func renderMessages(messages []mesh.Message, channel string, height int, width int) string {
 	filtered := make([]mesh.Message, 0, len(messages))
 	for _, message := range messages {
@@ -549,9 +672,12 @@ func waitForRx(messages <-chan mesh.Message) tea.Cmd {
 	}
 }
 
-func sendText(node *mesh.Mesh, channel string, text string) tea.Cmd {
+func sendText(api *apiClient, channel string, text string) tea.Cmd {
 	return func() tea.Msg {
-		id, err := node.Send(text, mesh.SendOptions{Channel: channel})
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		id, err := api.Send(ctx, text, mesh.SendOptions{Channel: channel})
 		if err != nil {
 			return sendErrMsg{err: err}
 		}
@@ -559,15 +685,12 @@ func sendText(node *mesh.Mesh, channel string, text string) tea.Cmd {
 	}
 }
 
-func addChannel(node *mesh.Mesh, name string) tea.Cmd {
+func addChannel(api *apiClient, name string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		if err := node.AddChannel(ctx, mesh.ChannelOptions{Name: name}); err != nil {
-			return channelOpMsg{err: err}
-		}
-		channels, err := node.Channels(ctx)
+		channels, err := api.AddChannel(ctx, name)
 		if err != nil {
 			return channelOpMsg{err: err}
 		}
@@ -575,15 +698,12 @@ func addChannel(node *mesh.Mesh, name string) tea.Cmd {
 	}
 }
 
-func removeChannel(node *mesh.Mesh, name string) tea.Cmd {
+func removeChannel(api *apiClient, name string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		if err := node.RemoveChannel(ctx, name); err != nil {
-			return channelOpMsg{err: err}
-		}
-		channels, err := node.Channels(ctx)
+		channels, err := api.RemoveChannel(ctx, name)
 		if err != nil {
 			return channelOpMsg{err: err}
 		}
@@ -591,12 +711,12 @@ func removeChannel(node *mesh.Mesh, name string) tea.Cmd {
 	}
 }
 
-func traceRoute(node *mesh.Mesh, target uint32, channel string) tea.Cmd {
+func traceRoute(api *apiClient, target uint32, channel string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 95*time.Second)
 		defer cancel()
 
-		route, err := node.TraceRoute(ctx, mesh.TraceRouteOptions{
+		route, err := api.TraceRoute(ctx, mesh.TraceRouteOptions{
 			To:       target,
 			Channel:  channel,
 			HopLimit: 3,
@@ -608,12 +728,12 @@ func traceRoute(node *mesh.Mesh, target uint32, channel string) tea.Cmd {
 	}
 }
 
-func loadNodes(node *mesh.Mesh) tea.Cmd {
+func loadNodes(api *apiClient) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		nodes, err := node.Nodes(ctx)
+		nodes, err := api.Nodes(ctx)
 		return nodesMsg{nodes: nodes, err: err}
 	}
 }

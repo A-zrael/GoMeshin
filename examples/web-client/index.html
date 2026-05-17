@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GoMeshin Web Client</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>GoMeshin</h1>
+        <p id="status">Disconnected</p>
+      </div>
+      <form id="connect-form" class="connect-form">
+        <label>
+          API
+          <input id="api-url" type="url" spellcheck="false" />
+        </label>
+        <button type="submit">Connect</button>
+      </form>
+    </header>
+
+    <main class="layout">
+      <section class="pane chat-pane">
+        <div class="pane-header">
+          <div>
+            <h2>Messages</h2>
+            <span id="message-count">0 shown</span>
+          </div>
+          <label>
+            Channel
+            <select id="channel-select"></select>
+          </label>
+        </div>
+        <ol id="messages" class="messages"></ol>
+        <form id="send-form" class="send-form">
+          <input id="message-text" type="text" placeholder="Message" autocomplete="off" />
+          <button type="submit">Send</button>
+        </form>
+      </section>
+
+      <aside class="side">
+        <section class="pane">
+          <div class="pane-header">
+            <h2>Channels</h2>
+            <button id="refresh-channels" type="button">Refresh</button>
+          </div>
+          <ul id="channels" class="list"></ul>
+        </section>
+
+        <section class="pane">
+          <div class="pane-header">
+            <h2>Nodes</h2>
+            <button id="refresh-nodes" type="button">Refresh</button>
+          </div>
+          <input id="node-search" class="filter" type="search" placeholder="Search nodes" />
+          <ul id="nodes" class="list nodes"></ul>
+        </section>
+
+        <section class="pane">
+          <div class="pane-header">
+            <h2>Traceroute</h2>
+          </div>
+          <form id="trace-form" class="trace-form">
+            <select id="trace-target"></select>
+            <button type="submit">Run</button>
+          </form>
+          <pre id="trace-output" class="trace-output">No traceroute yet.</pre>
+        </section>
+      </aside>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

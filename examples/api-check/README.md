@@ -1,30 +1,22 @@
-# API Check Bubble Tea TUI
+# GoMeshin API Check TUI
 
-Separate Go module that imports GoMeshin like an external project and builds a Bubble Tea TUI on top of the public API.
+Separate Go module that talks to the `gomeshind` daemon over HTTP/SSE and builds a Bubble Tea TUI on top of the daemon API.
 
-It uses:
-
-```go
-import "meshin/mesh"
-```
-
-The local development import is wired with:
-
-```go
-replace meshin => ../..
-```
-
-Run from this directory:
+Start the daemon from the repo root:
 
 ```bash
-go run . -port /dev/ttyUSB0
+go run ./cmd/gomeshind -port /dev/ttyUSB0 -db gomeshin.db -listen 127.0.0.1:8080
 ```
 
-By default it stores messages, nodes, and channels in `gomeshin-api-check.db`.
+Then run the TUI from this directory:
 
 ```bash
-go run . -port /dev/ttyUSB0 -db rugged-node.db
+go run . -api http://127.0.0.1:8080
 ```
+
+The TUI no longer opens the serial port directly. The daemon owns the radio and database; the TUI is just a client.
+
+Live incoming messages are received from `/events`. Sends, node lists, channels, and traceroute use the JSON HTTP endpoints.
 
 Controls:
 
@@ -33,7 +25,9 @@ Controls:
 - Press `esc` to open the main menu.
 - In menus, use arrow keys to choose an option and `enter` to select.
 - The main menu contains messages, nodes, channels, tools, channel editing, and exit.
-- In tools, use arrow keys to select a node and `enter` to request traceroute.
+- In tools, press `enter` to open the traceroute target picker.
+- In the traceroute picker, type to search by short name, long name, or node number.
+- Use arrow keys to choose a filtered node and `enter` to request traceroute.
 - Exit is an explicit main menu option. `ctrl+c` also quits.
 
 Messages are filtered to the selected channel.
