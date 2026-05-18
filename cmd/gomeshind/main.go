@@ -146,6 +146,11 @@ func (s *apiServer) routes() http.Handler {
 	mux.HandleFunc("/nodes", s.handleNodes)
 	mux.HandleFunc("/positions", s.handlePositions)
 	mux.HandleFunc("/telemetry/environment", s.handleEnvironmentTelemetry)
+	mux.HandleFunc("/telemetry/device", s.handleDeviceTelemetry)
+	mux.HandleFunc("/telemetry/power", s.handlePowerTelemetry)
+	mux.HandleFunc("/telemetry/airquality", s.handleAirQualityTelemetry)
+	mux.HandleFunc("/telemetry/localstats", s.handleLocalStatsTelemetry)
+	mux.HandleFunc("/telemetry/health", s.handleHealthTelemetry)
 	mux.HandleFunc("/channels", s.handleChannels)
 	mux.HandleFunc("/channels/", s.handleChannel)
 	mux.HandleFunc("/traceroute", s.handleTraceRoute)
@@ -280,6 +285,66 @@ func (s *apiServer) handleEnvironmentTelemetry(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, http.StatusOK, environments)
+}
+
+func (s *apiServer) handleDeviceTelemetry(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	samples, err := s.mesh.DeviceTelemetries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, samples)
+}
+
+func (s *apiServer) handlePowerTelemetry(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	samples, err := s.mesh.PowerTelemetries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, samples)
+}
+
+func (s *apiServer) handleAirQualityTelemetry(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	samples, err := s.mesh.AirQualityTelemetries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, samples)
+}
+
+func (s *apiServer) handleLocalStatsTelemetry(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	samples, err := s.mesh.LocalStatsTelemetries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, samples)
+}
+
+func (s *apiServer) handleHealthTelemetry(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	samples, err := s.mesh.HealthTelemetries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, samples)
 }
 
 func (s *apiServer) handleChannels(w http.ResponseWriter, r *http.Request) {

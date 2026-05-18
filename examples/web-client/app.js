@@ -4,6 +4,13 @@ const state = {
   channels: [],
   nodes: [],
   environment: [],
+  telemetry: {
+    device: [],
+    power: [],
+    airquality: [],
+    localstats: [],
+    health: [],
+  },
   messages: [],
   selectedChannel: "Primary",
   map: null,
@@ -27,6 +34,9 @@ const els = {
   weather: document.querySelector("#weather"),
   weatherSummary: document.querySelector("#weather-summary"),
   refreshWeather: document.querySelector("#refresh-weather"),
+  telemetry: document.querySelector("#telemetry"),
+  telemetrySummary: document.querySelector("#telemetry-summary"),
+  refreshTelemetry: document.querySelector("#refresh-telemetry"),
   nodes: document.querySelector("#nodes"),
   nodeSearch: document.querySelector("#node-search"),
   traceTarget: document.querySelector("#trace-target"),
@@ -76,6 +86,7 @@ els.sendForm.addEventListener("submit", async (event) => {
 els.refreshChannels.addEventListener("click", loadChannels);
 els.refreshNodes.addEventListener("click", loadNodes);
 els.refreshWeather.addEventListener("click", loadWeather);
+els.refreshTelemetry.addEventListener("click", loadTelemetry);
 els.nodeSearch.addEventListener("input", renderNodes);
 els.fitMap.addEventListener("click", () => fitMapToMarkers(true));
 
@@ -107,7 +118,7 @@ async function connect() {
 
   try {
     await request("/health");
-    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather()]);
+    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather(), loadTelemetry()]);
     openEvents();
     setStatus(`Connected to ${state.apiURL}`, "connected");
   } catch (error) {
@@ -124,14 +135,16 @@ async function loadChannels() {
 }
 
 async function loadNodes() {
-  state.nodes = await request("/nodes");
+  const payload = await request("/nodes");
+  state.nodes = Array.isArray(payload) ? payload : [];
   renderNodes();
   renderWeather();
   renderMap();
 }
 
 async function loadWeather() {
-  state.environment = await request("/telemetry/environment");
+  const payload = await request("/telemetry/environment");
+  state.environment = Array.isArray(payload) ? payload : [];
   for (const environment of state.environment) {
     updateNodeEnvironment(environment);
   }
@@ -141,8 +154,25 @@ async function loadWeather() {
 }
 
 async function loadMessages() {
-  state.messages = await request("/messages");
+  const payload = await request("/messages");
+  state.messages = Array.isArray(payload) ? payload : [];
   renderMessages();
+}
+
+async function loadTelemetry() {
+  const [device, power, airquality, localstats, health] = await Promise.all([
+    request("/telemetry/device"),
+    request("/telemetry/power"),
+    request("/telemetry/airquality"),
+    request("/telemetry/localstats"),
+    request("/telemetry/health"),
+  ]);
+  state.telemetry.device = Array.isArray(device) ? device : [];
+  state.telemetry.power = Array.isArray(power) ? power : [];
+  state.telemetry.airquality = Array.isArray(airquality) ? airquality : [];
+  state.telemetry.localstats = Array.isArray(localstats) ? localstats : [];
+  state.telemetry.health = Array.isArray(health) ? health : [];
+  renderTelemetry();
 }
 
 function openEvents() {
@@ -306,10 +336,13 @@ function updateNodePosition(position) {
 }
 
 function upsertEnvironment(environment) {
-  const num = nodeNum(environmentNode(environment));
-  if (!num) return;
+  const key = environmentKey(environment);
+  if (!key) return;
 
-  const existingIndex = state.environment.findIndex((item) => nodeNum(environmentNode(item)) === num);
+  const eventTime = environmentTime(environment);
+  const existingIndex = state.environment.findIndex((item) => {
+    return environmentKey(item) === key && environmentTime(item) === eventTime;
+  });
   if (existingIndex >= 0) {
     state.environment[existingIndex] = environment;
     return;
@@ -318,20 +351,32 @@ function upsertEnvironment(environment) {
 }
 
 function updateNodeEnvironment(environment) {
-  const num = nodeNum(environmentNode(environment));
-  if (!num) return;
+  const node = environmentNode(environment);
+  const num = nodeNum(node);
+  const id = nodeID(node);
+  if (!num && !id) return;
 
-  const existing = state.nodes.find((node) => nodeNum(node) === num);
+  const existing = state.nodes.find((candidate) => {
+    const candidateNum = nodeNum(candidate);
+    if (num && candidateNum) {
+      return candidateNum === num;
+    }
+    return id && nodeID(candidate) === id;
+  });
   if (existing) {
-    existing.Environment = environment;
-    existing.environment = environment;
+    const currentTime = environmentTime(existing.environment ?? existing.Environment);
+    const incomingTime = environmentTime(environment);
+    if (incomingTime >= currentTime) {
+      existing.Environment = environment;
+      existing.environment = environment;
+    }
     return;
   }
 
-  const node = environmentNode(environment);
+  const parsedNum = num || parseNodeIDToNum(id);
   state.nodes.push({
-    Num: num,
-    ID: node.ID ?? node.id ?? "",
+    Num: parsedNum,
+    ID: id,
     LongName: node.LongName ?? node.longName ?? "",
     ShortName: node.ShortName ?? node.shortName ?? "",
     Environment: environment,
@@ -460,7 +505,8 @@ function isMapTabActive() {
 
 function renderMessages() {
 	const channel = state.selectedChannel;
-	const messages = state.messages.filter((message) => displayChannel(channelName(messageChannel(message))) === channel);
+	const source = Array.isArray(state.messages) ? state.messages : [];
+	const messages = source.filter((message) => displayChannel(channelName(messageChannel(message))) === channel);
 
   els.messages.replaceChildren();
   els.messageCount.textContent = `${messages.length} shown`;
@@ -524,6 +570,139 @@ function renderWeather() {
   }
 }
 
+function renderTelemetry() {
+  const byNode = telemetryByNode();
+  const cards = [...byNode.values()].sort((left, right) => right.latestTime - left.latestTime);
+  els.telemetrySummary.textContent = `${cards.length} nodes with telemetry`;
+  els.telemetry.replaceChildren();
+
+  if (cards.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No telemetry yet.";
+    els.telemetry.append(empty);
+    return;
+  }
+
+  for (const cardData of cards) {
+    const card = document.createElement("article");
+    card.className = "telemetry-card";
+
+    const header = document.createElement("div");
+    header.className = "telemetry-card-header";
+    const title = document.createElement("h3");
+    title.textContent = cardData.label;
+    const count = document.createElement("span");
+    count.className = "telemetry-count";
+    count.textContent = formatTime(cardData.latestAt);
+    header.append(title, count);
+    card.append(header);
+
+    if (cardData.environment) {
+      card.append(telemetrySection("Weather", [
+        ["Temp", formatMaybeNumber(environmentTemperature(cardData.environment), "C", 1)],
+        ["Humidity", formatMaybeNumber(environmentHumidity(cardData.environment), "%", 1)],
+        ["Pressure", formatMaybeNumber(environmentPressure(cardData.environment), "hPa", 1)],
+        ["Wind", formatWind(cardData.environment)],
+      ]));
+    }
+    if (cardData.device) {
+      card.append(telemetrySection("Device", [
+        ["Battery", formatMaybeInteger(telemetryField(cardData.device, "batteryLevel", "BatteryLevel"))],
+        ["Voltage", formatMaybeNumber(telemetryField(cardData.device, "voltage", "Voltage"), "V", 2)],
+        ["Chan Util", formatMaybeNumber(telemetryField(cardData.device, "channelUtilization", "ChannelUtilization"), "%", 1)],
+        ["TX Air", formatMaybeNumber(telemetryField(cardData.device, "airUtilTx", "AirUtilTx"), "%", 1)],
+      ]));
+    }
+    if (cardData.power) {
+      card.append(telemetrySection("Power", [
+        ["Ch1 V", formatMaybeNumber(telemetryField(cardData.power, "ch1Voltage", "Ch1Voltage"), "V", 2)],
+        ["Ch1 A", formatMaybeNumber(telemetryField(cardData.power, "ch1Current", "Ch1Current"), "A", 2)],
+        ["Ch2 V", formatMaybeNumber(telemetryField(cardData.power, "ch2Voltage", "Ch2Voltage"), "V", 2)],
+        ["Ch3 V", formatMaybeNumber(telemetryField(cardData.power, "ch3Voltage", "Ch3Voltage"), "V", 2)],
+      ]));
+    }
+    if (cardData.airquality) {
+      card.append(telemetrySection("Air Quality", [
+        ["CO2", formatMaybeInteger(telemetryField(cardData.airquality, "co2", "CO2"))],
+        ["PM2.5", formatMaybeInteger(telemetryField(cardData.airquality, "pm25Standard", "Pm25Standard"))],
+        ["PM10", formatMaybeInteger(telemetryField(cardData.airquality, "pm100Standard", "Pm100Standard"))],
+        ["P2.5 cnt", formatMaybeInteger(telemetryField(cardData.airquality, "particles25um", "Particles25um"))],
+      ]));
+    }
+    if (cardData.localstats) {
+      card.append(telemetrySection("Local Stats", [
+        ["Online", formatMaybeInteger(telemetryField(cardData.localstats, "numOnlineNodes", "NumOnlineNodes"))],
+        ["Total", formatMaybeInteger(telemetryField(cardData.localstats, "numTotalNodes", "NumTotalNodes"))],
+        ["TX", formatMaybeInteger(telemetryField(cardData.localstats, "numPacketsTx", "NumPacketsTx"))],
+        ["RX", formatMaybeInteger(telemetryField(cardData.localstats, "numPacketsRx", "NumPacketsRx"))],
+      ]));
+    }
+    if (cardData.health) {
+      card.append(telemetrySection("Health", [
+        ["Heart", formatMaybeInteger(telemetryField(cardData.health, "heartBpm", "HeartBPM"))],
+        ["SpO2", formatMaybeInteger(telemetryField(cardData.health, "spO2", "SpO2"))],
+        ["Temp", formatMaybeNumber(telemetryField(cardData.health, "temperature", "Temperature"), "C", 1)],
+      ]));
+    }
+
+    els.telemetry.append(card);
+  }
+}
+
+function telemetryByNode() {
+  const byNode = new Map();
+  mergeTelemetryKind(byNode, "environment", latestEnvironment());
+  mergeTelemetryKind(byNode, "device", latestTelemetrySamples(state.telemetry.device));
+  mergeTelemetryKind(byNode, "power", latestTelemetrySamples(state.telemetry.power));
+  mergeTelemetryKind(byNode, "airquality", latestTelemetrySamples(state.telemetry.airquality));
+  mergeTelemetryKind(byNode, "localstats", latestTelemetrySamples(state.telemetry.localstats));
+  mergeTelemetryKind(byNode, "health", latestTelemetrySamples(state.telemetry.health));
+  return byNode;
+}
+
+function mergeTelemetryKind(byNode, kind, samples) {
+  for (const sample of samples) {
+    const key = environmentKey(sample);
+    if (!key) continue;
+    const row = byNode.get(key) || {
+      label: formatEnvironmentNode(sample),
+      latestAt: telemetryReceivedAt(sample),
+      latestTime: telemetryTime(sample),
+    };
+    row[kind] = sample;
+    const received = telemetryReceivedAt(sample);
+    const parsed = telemetryTime(sample);
+    if (parsed > row.latestTime) {
+      row.latestTime = parsed;
+      row.latestAt = received;
+    }
+    byNode.set(key, row);
+  }
+}
+
+function telemetrySection(title, rows) {
+  const section = document.createElement("section");
+  section.className = "telemetry-section";
+  const h4 = document.createElement("h4");
+  h4.textContent = title;
+  section.append(h4);
+
+  const dl = document.createElement("dl");
+  dl.className = "telemetry-metrics";
+  for (const [label, value] of rows) {
+    const item = document.createElement("div");
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = label;
+    dd.textContent = value || "-";
+    item.append(dt, dd);
+    dl.append(item);
+  }
+  section.append(dl);
+  return section;
+}
+
 function activeChannels(channels) {
 	const active = channels.filter((channel) => channelRole(channel) !== "DISABLED");
 	return active.length ? active : [{ index: 0, name: "Primary", role: "PRIMARY" }];
@@ -563,20 +742,58 @@ function latestEnvironment() {
   for (const node of state.nodes) {
     const environment = nodeEnvironment(node);
     if (environment) {
-      byNode.set(nodeNum(environmentNode(environment)) || nodeNum(node), environment);
+      const key = environmentKey(environment) || `num:${nodeNum(node)}`;
+      if (key) {
+        const current = byNode.get(key);
+        if (!current || environmentTime(environment) >= environmentTime(current)) {
+          byNode.set(key, environment);
+        }
+      }
     }
   }
   for (const environment of state.environment) {
-    const num = nodeNum(environmentNode(environment));
-    if (num) {
-      byNode.set(num, environment);
+    const key = environmentKey(environment);
+    if (key) {
+      const current = byNode.get(key);
+      if (!current || environmentTime(environment) >= environmentTime(current)) {
+        byNode.set(key, environment);
+      }
     }
   }
   return [...byNode.values()].sort((left, right) => {
-    const leftTime = Date.parse(left.receivedAt ?? left.ReceivedAt ?? "") || 0;
-    const rightTime = Date.parse(right.receivedAt ?? right.ReceivedAt ?? "") || 0;
+    const leftTime = environmentTime(left);
+    const rightTime = environmentTime(right);
     return rightTime - leftTime;
   });
+}
+
+function latestTelemetrySamples(samples = []) {
+  const byNode = new Map();
+  for (const sample of samples) {
+    const key = environmentKey(sample);
+    if (!key) continue;
+    const current = byNode.get(key);
+    if (!current || telemetryTime(sample) >= telemetryTime(current)) {
+      byNode.set(key, sample);
+    }
+  }
+  return [...byNode.values()].sort((left, right) => telemetryTime(right) - telemetryTime(left));
+}
+
+function telemetryReceivedAt(sample = {}) {
+  return sample.receivedAt ?? sample.ReceivedAt ?? sample.timestamp ?? sample.Timestamp ?? "";
+}
+
+function telemetryTime(sample = {}) {
+  const parsed = Date.parse(telemetryReceivedAt(sample));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function telemetryField(sample = {}, camel, pascal) {
+  if (Object.prototype.hasOwnProperty.call(sample, camel)) {
+    return sample[camel];
+  }
+  return sample[pascal];
 }
 
 function appendMetric(parent, label, value) {
@@ -793,6 +1010,40 @@ function formatLatLon(position) {
 
 function formatNodeID(num) {
 	return `!${Number(num || 0).toString(16).padStart(8, "0")}`;
+}
+
+function nodeID(node = {}) {
+	return node.id ?? node.ID ?? "";
+}
+
+function parseNodeIDToNum(id) {
+	if (typeof id !== "string") return 0;
+	const normalized = id.trim().toLowerCase();
+	const hex = normalized.startsWith("!") ? normalized.slice(1) : normalized;
+	if (!/^[0-9a-f]{1,8}$/.test(hex)) return 0;
+	const parsed = Number.parseInt(hex, 16);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function environmentKey(environment = {}) {
+	const node = environmentNode(environment);
+	const num = nodeNum(node);
+	if (num) return `num:${num}`;
+	const id = nodeID(node);
+	if (id) return `id:${id.toLowerCase()}`;
+	return "";
+}
+
+function environmentTime(environment = {}) {
+	const received = Date.parse(environment.receivedAt ?? environment.ReceivedAt ?? "");
+	if (Number.isFinite(received)) {
+		return received;
+	}
+	const sample = Date.parse(environment.timestamp ?? environment.Timestamp ?? "");
+	if (Number.isFinite(sample)) {
+		return sample;
+	}
+	return 0;
 }
 
 function setStatus(text, className) {

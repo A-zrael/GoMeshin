@@ -116,6 +116,94 @@ CREATE TABLE IF NOT EXISTS environment_telemetry (
 );
 
 CREATE INDEX IF NOT EXISTS environment_telemetry_received_at_idx ON environment_telemetry(received_at);
+
+CREATE TABLE IF NOT EXISTS device_telemetry (
+	node_num INTEGER PRIMARY KEY,
+	node_id TEXT NOT NULL,
+	node_long_name TEXT NOT NULL,
+	node_short_name TEXT NOT NULL,
+	battery_level INTEGER,
+	voltage REAL,
+	channel_utilization REAL,
+	air_util_tx REAL,
+	uptime_seconds INTEGER,
+	timestamp INTEGER NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS device_telemetry_received_at_idx ON device_telemetry(received_at);
+
+CREATE TABLE IF NOT EXISTS power_telemetry (
+	node_num INTEGER PRIMARY KEY,
+	node_id TEXT NOT NULL,
+	node_long_name TEXT NOT NULL,
+	node_short_name TEXT NOT NULL,
+	ch1_voltage REAL,
+	ch1_current REAL,
+	ch2_voltage REAL,
+	ch2_current REAL,
+	ch3_voltage REAL,
+	ch3_current REAL,
+	timestamp INTEGER NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS power_telemetry_received_at_idx ON power_telemetry(received_at);
+
+CREATE TABLE IF NOT EXISTS air_quality_telemetry (
+	node_num INTEGER PRIMARY KEY,
+	node_id TEXT NOT NULL,
+	node_long_name TEXT NOT NULL,
+	node_short_name TEXT NOT NULL,
+	pm10_standard INTEGER,
+	pm25_standard INTEGER,
+	pm100_standard INTEGER,
+	pm10_environmental INTEGER,
+	pm25_environmental INTEGER,
+	pm100_environmental INTEGER,
+	particles_03um INTEGER,
+	particles_05um INTEGER,
+	particles_10um INTEGER,
+	particles_25um INTEGER,
+	particles_50um INTEGER,
+	particles_100um INTEGER,
+	co2 INTEGER,
+	timestamp INTEGER NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS air_quality_telemetry_received_at_idx ON air_quality_telemetry(received_at);
+
+CREATE TABLE IF NOT EXISTS local_stats_telemetry (
+	node_num INTEGER PRIMARY KEY,
+	node_id TEXT NOT NULL,
+	node_long_name TEXT NOT NULL,
+	node_short_name TEXT NOT NULL,
+	uptime_seconds INTEGER NOT NULL,
+	channel_utilization REAL NOT NULL,
+	air_util_tx REAL NOT NULL,
+	num_packets_tx INTEGER NOT NULL,
+	num_packets_rx INTEGER NOT NULL,
+	num_packets_rx_bad INTEGER NOT NULL,
+	num_online_nodes INTEGER NOT NULL,
+	num_total_nodes INTEGER NOT NULL,
+	num_rx_dupe INTEGER NOT NULL,
+	num_tx_relay INTEGER NOT NULL,
+	num_tx_relay_canceled INTEGER NOT NULL,
+	timestamp INTEGER NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS local_stats_telemetry_received_at_idx ON local_stats_telemetry(received_at);
+
+CREATE TABLE IF NOT EXISTS health_telemetry (
+	node_num INTEGER PRIMARY KEY,
+	node_id TEXT NOT NULL,
+	node_long_name TEXT NOT NULL,
+	node_short_name TEXT NOT NULL,
+	heart_bpm INTEGER,
+	spo2 INTEGER,
+	temperature REAL,
+	timestamp INTEGER NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS health_telemetry_received_at_idx ON health_telemetry(received_at);
 `)
 	return err
 }
@@ -304,6 +392,188 @@ ON CONFLICT(node_num) DO UPDATE SET
 		nullableFloat32(environment.Weight),
 		timestamp.Unix(),
 		receivedAt.Unix(),
+	)
+	return err
+}
+
+func (s *Store) SaveDeviceTelemetry(ctx context.Context, sample mesh.DeviceTelemetry) error {
+	receivedAt := sample.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := sample.Timestamp
+	if timestamp.IsZero() {
+		timestamp = receivedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO device_telemetry (
+	node_num, node_id, node_long_name, node_short_name,
+	battery_level, voltage, channel_utilization, air_util_tx, uptime_seconds, timestamp, received_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(node_num) DO UPDATE SET
+	node_id = excluded.node_id,
+	node_long_name = excluded.node_long_name,
+	node_short_name = excluded.node_short_name,
+	battery_level = excluded.battery_level,
+	voltage = excluded.voltage,
+	channel_utilization = excluded.channel_utilization,
+	air_util_tx = excluded.air_util_tx,
+	uptime_seconds = excluded.uptime_seconds,
+	timestamp = excluded.timestamp,
+	received_at = excluded.received_at`,
+		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
+		nullableUint32(sample.BatteryLevel), nullableFloat32(sample.Voltage), nullableFloat32(sample.ChannelUtilization),
+		nullableFloat32(sample.AirUtilTx), nullableUint32(sample.UptimeSeconds), timestamp.Unix(), receivedAt.Unix(),
+	)
+	return err
+}
+
+func (s *Store) SavePowerTelemetry(ctx context.Context, sample mesh.PowerTelemetry) error {
+	receivedAt := sample.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := sample.Timestamp
+	if timestamp.IsZero() {
+		timestamp = receivedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO power_telemetry (
+	node_num, node_id, node_long_name, node_short_name,
+	ch1_voltage, ch1_current, ch2_voltage, ch2_current, ch3_voltage, ch3_current,
+	timestamp, received_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(node_num) DO UPDATE SET
+	node_id = excluded.node_id,
+	node_long_name = excluded.node_long_name,
+	node_short_name = excluded.node_short_name,
+	ch1_voltage = excluded.ch1_voltage,
+	ch1_current = excluded.ch1_current,
+	ch2_voltage = excluded.ch2_voltage,
+	ch2_current = excluded.ch2_current,
+	ch3_voltage = excluded.ch3_voltage,
+	ch3_current = excluded.ch3_current,
+	timestamp = excluded.timestamp,
+	received_at = excluded.received_at`,
+		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
+		nullableFloat32(sample.Ch1Voltage), nullableFloat32(sample.Ch1Current), nullableFloat32(sample.Ch2Voltage),
+		nullableFloat32(sample.Ch2Current), nullableFloat32(sample.Ch3Voltage), nullableFloat32(sample.Ch3Current),
+		timestamp.Unix(), receivedAt.Unix(),
+	)
+	return err
+}
+
+func (s *Store) SaveAirQualityTelemetry(ctx context.Context, sample mesh.AirQualityTelemetry) error {
+	receivedAt := sample.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := sample.Timestamp
+	if timestamp.IsZero() {
+		timestamp = receivedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO air_quality_telemetry (
+	node_num, node_id, node_long_name, node_short_name,
+	pm10_standard, pm25_standard, pm100_standard, pm10_environmental, pm25_environmental, pm100_environmental,
+	particles_03um, particles_05um, particles_10um, particles_25um, particles_50um, particles_100um, co2,
+	timestamp, received_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(node_num) DO UPDATE SET
+	node_id = excluded.node_id,
+	node_long_name = excluded.node_long_name,
+	node_short_name = excluded.node_short_name,
+	pm10_standard = excluded.pm10_standard,
+	pm25_standard = excluded.pm25_standard,
+	pm100_standard = excluded.pm100_standard,
+	pm10_environmental = excluded.pm10_environmental,
+	pm25_environmental = excluded.pm25_environmental,
+	pm100_environmental = excluded.pm100_environmental,
+	particles_03um = excluded.particles_03um,
+	particles_05um = excluded.particles_05um,
+	particles_10um = excluded.particles_10um,
+	particles_25um = excluded.particles_25um,
+	particles_50um = excluded.particles_50um,
+	particles_100um = excluded.particles_100um,
+	co2 = excluded.co2,
+	timestamp = excluded.timestamp,
+	received_at = excluded.received_at`,
+		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
+		nullableUint32(sample.Pm10Standard), nullableUint32(sample.Pm25Standard), nullableUint32(sample.Pm100Standard),
+		nullableUint32(sample.Pm10Environmental), nullableUint32(sample.Pm25Environmental), nullableUint32(sample.Pm100Environmental),
+		nullableUint32(sample.Particles03um), nullableUint32(sample.Particles05um), nullableUint32(sample.Particles10um),
+		nullableUint32(sample.Particles25um), nullableUint32(sample.Particles50um), nullableUint32(sample.Particles100um),
+		nullableUint32(sample.CO2), timestamp.Unix(), receivedAt.Unix(),
+	)
+	return err
+}
+
+func (s *Store) SaveLocalStatsTelemetry(ctx context.Context, sample mesh.LocalStatsTelemetry) error {
+	receivedAt := sample.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := sample.Timestamp
+	if timestamp.IsZero() {
+		timestamp = receivedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO local_stats_telemetry (
+	node_num, node_id, node_long_name, node_short_name,
+	uptime_seconds, channel_utilization, air_util_tx, num_packets_tx, num_packets_rx, num_packets_rx_bad,
+	num_online_nodes, num_total_nodes, num_rx_dupe, num_tx_relay, num_tx_relay_canceled,
+	timestamp, received_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(node_num) DO UPDATE SET
+	node_id = excluded.node_id,
+	node_long_name = excluded.node_long_name,
+	node_short_name = excluded.node_short_name,
+	uptime_seconds = excluded.uptime_seconds,
+	channel_utilization = excluded.channel_utilization,
+	air_util_tx = excluded.air_util_tx,
+	num_packets_tx = excluded.num_packets_tx,
+	num_packets_rx = excluded.num_packets_rx,
+	num_packets_rx_bad = excluded.num_packets_rx_bad,
+	num_online_nodes = excluded.num_online_nodes,
+	num_total_nodes = excluded.num_total_nodes,
+	num_rx_dupe = excluded.num_rx_dupe,
+	num_tx_relay = excluded.num_tx_relay,
+	num_tx_relay_canceled = excluded.num_tx_relay_canceled,
+	timestamp = excluded.timestamp,
+	received_at = excluded.received_at`,
+		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
+		sample.UptimeSeconds, sample.ChannelUtilization, sample.AirUtilTx, sample.NumPacketsTx, sample.NumPacketsRx, sample.NumPacketsRxBad,
+		sample.NumOnlineNodes, sample.NumTotalNodes, sample.NumRxDupe, sample.NumTxRelay, sample.NumTxRelayCanceled,
+		timestamp.Unix(), receivedAt.Unix(),
+	)
+	return err
+}
+
+func (s *Store) SaveHealthTelemetry(ctx context.Context, sample mesh.HealthTelemetry) error {
+	receivedAt := sample.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := sample.Timestamp
+	if timestamp.IsZero() {
+		timestamp = receivedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO health_telemetry (
+	node_num, node_id, node_long_name, node_short_name, heart_bpm, spo2, temperature, timestamp, received_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(node_num) DO UPDATE SET
+	node_id = excluded.node_id,
+	node_long_name = excluded.node_long_name,
+	node_short_name = excluded.node_short_name,
+	heart_bpm = excluded.heart_bpm,
+	spo2 = excluded.spo2,
+	temperature = excluded.temperature,
+	timestamp = excluded.timestamp,
+	received_at = excluded.received_at`,
+		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
+		nullableUint32(sample.HeartBPM), nullableUint32(sample.SpO2), nullableFloat32(sample.Temperature),
+		timestamp.Unix(), receivedAt.Unix(),
 	)
 	return err
 }
@@ -541,6 +811,149 @@ ORDER BY received_at DESC`)
 	}
 
 	return environments, rows.Err()
+}
+
+func (s *Store) DeviceTelemetries(ctx context.Context) ([]mesh.DeviceTelemetry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT node_num, node_id, node_long_name, node_short_name, battery_level, voltage, channel_utilization, air_util_tx, uptime_seconds, timestamp, received_at
+FROM device_telemetry ORDER BY received_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mesh.DeviceTelemetry
+	for rows.Next() {
+		var sample mesh.DeviceTelemetry
+		var battery, uptime sql.NullInt64
+		var voltage, channelUtil, airUtil sql.NullFloat64
+		var timestamp, receivedAt int64
+		if err := rows.Scan(&sample.Node.Num, &sample.Node.ID, &sample.Node.LongName, &sample.Node.ShortName, &battery, &voltage, &channelUtil, &airUtil, &uptime, &timestamp, &receivedAt); err != nil {
+			return nil, err
+		}
+		sample.BatteryLevel = uint32Ptr(battery)
+		sample.Voltage = float32Ptr(voltage)
+		sample.ChannelUtilization = float32Ptr(channelUtil)
+		sample.AirUtilTx = float32Ptr(airUtil)
+		sample.UptimeSeconds = uint32Ptr(uptime)
+		sample.Timestamp = time.Unix(timestamp, 0)
+		sample.ReceivedAt = time.Unix(receivedAt, 0)
+		out = append(out, sample)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PowerTelemetries(ctx context.Context) ([]mesh.PowerTelemetry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT node_num, node_id, node_long_name, node_short_name, ch1_voltage, ch1_current, ch2_voltage, ch2_current, ch3_voltage, ch3_current, timestamp, received_at
+FROM power_telemetry ORDER BY received_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mesh.PowerTelemetry
+	for rows.Next() {
+		var sample mesh.PowerTelemetry
+		var ch1v, ch1c, ch2v, ch2c, ch3v, ch3c sql.NullFloat64
+		var timestamp, receivedAt int64
+		if err := rows.Scan(&sample.Node.Num, &sample.Node.ID, &sample.Node.LongName, &sample.Node.ShortName, &ch1v, &ch1c, &ch2v, &ch2c, &ch3v, &ch3c, &timestamp, &receivedAt); err != nil {
+			return nil, err
+		}
+		sample.Ch1Voltage = float32Ptr(ch1v)
+		sample.Ch1Current = float32Ptr(ch1c)
+		sample.Ch2Voltage = float32Ptr(ch2v)
+		sample.Ch2Current = float32Ptr(ch2c)
+		sample.Ch3Voltage = float32Ptr(ch3v)
+		sample.Ch3Current = float32Ptr(ch3c)
+		sample.Timestamp = time.Unix(timestamp, 0)
+		sample.ReceivedAt = time.Unix(receivedAt, 0)
+		out = append(out, sample)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AirQualityTelemetries(ctx context.Context) ([]mesh.AirQualityTelemetry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT node_num, node_id, node_long_name, node_short_name, pm10_standard, pm25_standard, pm100_standard, pm10_environmental, pm25_environmental, pm100_environmental, particles_03um, particles_05um, particles_10um, particles_25um, particles_50um, particles_100um, co2, timestamp, received_at
+FROM air_quality_telemetry ORDER BY received_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mesh.AirQualityTelemetry
+	for rows.Next() {
+		var sample mesh.AirQualityTelemetry
+		var pm10s, pm25s, pm100s, pm10e, pm25e, pm100e, p03, p05, p10, p25, p50, p100, co2 sql.NullInt64
+		var timestamp, receivedAt int64
+		if err := rows.Scan(&sample.Node.Num, &sample.Node.ID, &sample.Node.LongName, &sample.Node.ShortName, &pm10s, &pm25s, &pm100s, &pm10e, &pm25e, &pm100e, &p03, &p05, &p10, &p25, &p50, &p100, &co2, &timestamp, &receivedAt); err != nil {
+			return nil, err
+		}
+		sample.Pm10Standard = uint32Ptr(pm10s)
+		sample.Pm25Standard = uint32Ptr(pm25s)
+		sample.Pm100Standard = uint32Ptr(pm100s)
+		sample.Pm10Environmental = uint32Ptr(pm10e)
+		sample.Pm25Environmental = uint32Ptr(pm25e)
+		sample.Pm100Environmental = uint32Ptr(pm100e)
+		sample.Particles03um = uint32Ptr(p03)
+		sample.Particles05um = uint32Ptr(p05)
+		sample.Particles10um = uint32Ptr(p10)
+		sample.Particles25um = uint32Ptr(p25)
+		sample.Particles50um = uint32Ptr(p50)
+		sample.Particles100um = uint32Ptr(p100)
+		sample.CO2 = uint32Ptr(co2)
+		sample.Timestamp = time.Unix(timestamp, 0)
+		sample.ReceivedAt = time.Unix(receivedAt, 0)
+		out = append(out, sample)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) LocalStatsTelemetries(ctx context.Context) ([]mesh.LocalStatsTelemetry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT node_num, node_id, node_long_name, node_short_name, uptime_seconds, channel_utilization, air_util_tx, num_packets_tx, num_packets_rx, num_packets_rx_bad, num_online_nodes, num_total_nodes, num_rx_dupe, num_tx_relay, num_tx_relay_canceled, timestamp, received_at
+FROM local_stats_telemetry ORDER BY received_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mesh.LocalStatsTelemetry
+	for rows.Next() {
+		var sample mesh.LocalStatsTelemetry
+		var timestamp, receivedAt int64
+		if err := rows.Scan(&sample.Node.Num, &sample.Node.ID, &sample.Node.LongName, &sample.Node.ShortName, &sample.UptimeSeconds, &sample.ChannelUtilization, &sample.AirUtilTx, &sample.NumPacketsTx, &sample.NumPacketsRx, &sample.NumPacketsRxBad, &sample.NumOnlineNodes, &sample.NumTotalNodes, &sample.NumRxDupe, &sample.NumTxRelay, &sample.NumTxRelayCanceled, &timestamp, &receivedAt); err != nil {
+			return nil, err
+		}
+		sample.Timestamp = time.Unix(timestamp, 0)
+		sample.ReceivedAt = time.Unix(receivedAt, 0)
+		out = append(out, sample)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) HealthTelemetries(ctx context.Context) ([]mesh.HealthTelemetry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT node_num, node_id, node_long_name, node_short_name, heart_bpm, spo2, temperature, timestamp, received_at
+FROM health_telemetry ORDER BY received_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mesh.HealthTelemetry
+	for rows.Next() {
+		var sample mesh.HealthTelemetry
+		var heart, spo2 sql.NullInt64
+		var temp sql.NullFloat64
+		var timestamp, receivedAt int64
+		if err := rows.Scan(&sample.Node.Num, &sample.Node.ID, &sample.Node.LongName, &sample.Node.ShortName, &heart, &spo2, &temp, &timestamp, &receivedAt); err != nil {
+			return nil, err
+		}
+		sample.HeartBPM = uint32Ptr(heart)
+		sample.SpO2 = uint32Ptr(spo2)
+		sample.Temperature = float32Ptr(temp)
+		sample.Timestamp = time.Unix(timestamp, 0)
+		sample.ReceivedAt = time.Unix(receivedAt, 0)
+		out = append(out, sample)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Channels(ctx context.Context) ([]mesh.Channel, error) {

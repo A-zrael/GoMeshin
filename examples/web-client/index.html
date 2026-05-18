@@ -31,6 +31,7 @@
       <button class="tab active" type="button" data-tab="chat">Chat</button>
       <button class="tab" type="button" data-tab="map">Map</button>
       <button class="tab" type="button" data-tab="weather">Weather</button>
+      <button class="tab" type="button" data-tab="telemetry">Telemetry</button>
       <button class="tab" type="button" data-tab="nodes">Nodes</button>
       <button class="tab" type="button" data-tab="tools">Tools</button>
     </nav>
@@ -79,6 +80,19 @@
             <button id="refresh-weather" type="button">Refresh</button>
           </div>
           <div id="weather" class="weather-grid"></div>
+        </section>
+      </section>
+
+      <section class="view" data-view="telemetry">
+        <section class="pane telemetry-pane">
+          <div class="pane-header">
+            <div>
+              <h2>Telemetry</h2>
+              <span id="telemetry-summary">0 samples</span>
+            </div>
+            <button id="refresh-telemetry" type="button">Refresh</button>
+          </div>
+          <div id="telemetry" class="telemetry-grid"></div>
         </section>
       </section>
 

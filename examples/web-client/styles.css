@@ -246,6 +246,11 @@ h2 {
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.telemetry-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
 .weather-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -253,6 +258,88 @@ h2 {
   gap: 12px;
   padding: 12px;
   overflow: auto;
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  align-content: start;
+  gap: 12px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.telemetry-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #11171c;
+}
+
+.telemetry-card-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.telemetry-card-header h3 {
+  margin: 0;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.telemetry-empty {
+  color: var(--muted);
+  padding: 6px 2px;
+}
+
+.telemetry-section {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.telemetry-section h4 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.telemetry-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.telemetry-metrics div {
+  min-width: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: #0d1115;
+}
+
+.telemetry-metrics dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.telemetry-metrics dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 700;
 }
 
 .weather-card {

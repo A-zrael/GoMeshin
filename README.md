@@ -93,6 +93,11 @@ GET    /messages?channel=Primary
 POST   /messages
 GET    /positions
 GET    /telemetry/environment
+GET    /telemetry/device
+GET    /telemetry/power
+GET    /telemetry/airquality
+GET    /telemetry/localstats
+GET    /telemetry/health
 POST   /traceroute
 GET    /events
 GET    /events?channel=Primary

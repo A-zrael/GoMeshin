@@ -32,6 +32,11 @@ type Mesh struct {
 	nodes        map[uint32]Node
 	positions    map[uint32]Position
 	environments map[uint32]EnvironmentTelemetry
+	devices      map[uint32]DeviceTelemetry
+	powers       map[uint32]PowerTelemetry
+	airs         map[uint32]AirQualityTelemetry
+	locals       map[uint32]LocalStatsTelemetry
+	healths      map[uint32]HealthTelemetry
 	channels     map[int32]Channel
 
 	subsMu                 sync.RWMutex
@@ -102,6 +107,74 @@ type EnvironmentTelemetry struct {
 	Weight             *float32
 	Timestamp          time.Time
 	ReceivedAt         time.Time
+}
+
+type DeviceTelemetry struct {
+	Node               NodeRef
+	BatteryLevel       *uint32
+	Voltage            *float32
+	ChannelUtilization *float32
+	AirUtilTx          *float32
+	UptimeSeconds      *uint32
+	Timestamp          time.Time
+	ReceivedAt         time.Time
+}
+
+type PowerTelemetry struct {
+	Node       NodeRef
+	Ch1Voltage *float32
+	Ch1Current *float32
+	Ch2Voltage *float32
+	Ch2Current *float32
+	Ch3Voltage *float32
+	Ch3Current *float32
+	Timestamp  time.Time
+	ReceivedAt time.Time
+}
+
+type AirQualityTelemetry struct {
+	Node               NodeRef
+	Pm10Standard       *uint32
+	Pm25Standard       *uint32
+	Pm100Standard      *uint32
+	Pm10Environmental  *uint32
+	Pm25Environmental  *uint32
+	Pm100Environmental *uint32
+	Particles03um      *uint32
+	Particles05um      *uint32
+	Particles10um      *uint32
+	Particles25um      *uint32
+	Particles50um      *uint32
+	Particles100um     *uint32
+	CO2                *uint32
+	Timestamp          time.Time
+	ReceivedAt         time.Time
+}
+
+type LocalStatsTelemetry struct {
+	Node               NodeRef
+	UptimeSeconds      uint32
+	ChannelUtilization float32
+	AirUtilTx          float32
+	NumPacketsTx       uint32
+	NumPacketsRx       uint32
+	NumPacketsRxBad    uint32
+	NumOnlineNodes     uint32
+	NumTotalNodes      uint32
+	NumRxDupe          uint32
+	NumTxRelay         uint32
+	NumTxRelayCanceled uint32
+	Timestamp          time.Time
+	ReceivedAt         time.Time
+}
+
+type HealthTelemetry struct {
+	Node        NodeRef
+	HeartBPM    *uint32
+	SpO2        *uint32
+	Temperature *float32
+	Timestamp   time.Time
+	ReceivedAt  time.Time
 }
 
 type Node struct {
@@ -176,6 +249,11 @@ func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 		nodes:                  make(map[uint32]Node),
 		positions:              make(map[uint32]Position),
 		environments:           make(map[uint32]EnvironmentTelemetry),
+		devices:                make(map[uint32]DeviceTelemetry),
+		powers:                 make(map[uint32]PowerTelemetry),
+		airs:                   make(map[uint32]AirQualityTelemetry),
+		locals:                 make(map[uint32]LocalStatsTelemetry),
+		healths:                make(map[uint32]HealthTelemetry),
 		channels:               make(map[int32]Channel),
 		subscribers:            make(map[chan Message]struct{}),
 		positionSubscribers:    make(map[chan Position]struct{}),
@@ -198,6 +276,24 @@ func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 		if node.Position != nil {
 			m.upsertPosition(convertPosition(*node.Position, m.nodeRef))
 		}
+	}
+	for _, environment := range radio.EnvironmentTelemetries() {
+		m.upsertEnvironment(convertEnvironmentTelemetry(environment, m.nodeRef))
+	}
+	for _, sample := range radio.DeviceTelemetries() {
+		m.upsertDeviceTelemetry(convertDeviceTelemetry(sample, m.nodeRef))
+	}
+	for _, sample := range radio.PowerTelemetries() {
+		m.upsertPowerTelemetry(convertPowerTelemetry(sample, m.nodeRef))
+	}
+	for _, sample := range radio.AirQualityTelemetries() {
+		m.upsertAirQualityTelemetry(convertAirQualityTelemetry(sample, m.nodeRef))
+	}
+	for _, sample := range radio.LocalStatsTelemetries() {
+		m.upsertLocalStatsTelemetry(convertLocalStatsTelemetry(sample, m.nodeRef))
+	}
+	for _, sample := range radio.HealthTelemetries() {
+		m.upsertHealthTelemetry(convertHealthTelemetry(sample, m.nodeRef))
 	}
 	if myNode := radio.MyNode(); myNode != nil {
 		m.myNode = myNode.Num
@@ -469,6 +565,26 @@ func (m *Mesh) EnvironmentTelemetries(ctx context.Context) ([]EnvironmentTelemet
 	return m.store.EnvironmentTelemetries(ctx)
 }
 
+func (m *Mesh) DeviceTelemetries(ctx context.Context) ([]DeviceTelemetry, error) {
+	return m.store.DeviceTelemetries(ctx)
+}
+
+func (m *Mesh) PowerTelemetries(ctx context.Context) ([]PowerTelemetry, error) {
+	return m.store.PowerTelemetries(ctx)
+}
+
+func (m *Mesh) AirQualityTelemetries(ctx context.Context) ([]AirQualityTelemetry, error) {
+	return m.store.AirQualityTelemetries(ctx)
+}
+
+func (m *Mesh) LocalStatsTelemetries(ctx context.Context) ([]LocalStatsTelemetry, error) {
+	return m.store.LocalStatsTelemetries(ctx)
+}
+
+func (m *Mesh) HealthTelemetries(ctx context.Context) ([]HealthTelemetry, error) {
+	return m.store.HealthTelemetries(ctx)
+}
+
 func (m *Mesh) Channels(ctx context.Context) ([]Channel, error) {
 	return m.store.Channels(ctx)
 }
@@ -541,6 +657,31 @@ func (m *Mesh) handleEvent(event meshtasticapi.Event) {
 			return
 		}
 		m.upsertEnvironment(convertEnvironmentTelemetry(*event.Environment, m.nodeRef))
+	case meshtasticapi.EventDevice:
+		if event.Device == nil {
+			return
+		}
+		m.upsertDeviceTelemetry(convertDeviceTelemetry(*event.Device, m.nodeRef))
+	case meshtasticapi.EventPower:
+		if event.Power == nil {
+			return
+		}
+		m.upsertPowerTelemetry(convertPowerTelemetry(*event.Power, m.nodeRef))
+	case meshtasticapi.EventAirQuality:
+		if event.AirQuality == nil {
+			return
+		}
+		m.upsertAirQualityTelemetry(convertAirQualityTelemetry(*event.AirQuality, m.nodeRef))
+	case meshtasticapi.EventLocalStats:
+		if event.LocalStats == nil {
+			return
+		}
+		m.upsertLocalStatsTelemetry(convertLocalStatsTelemetry(*event.LocalStats, m.nodeRef))
+	case meshtasticapi.EventHealth:
+		if event.Health == nil {
+			return
+		}
+		m.upsertHealthTelemetry(convertHealthTelemetry(*event.Health, m.nodeRef))
 	case meshtasticapi.EventTraceRoute:
 		if event.TraceRoute == nil {
 			return
@@ -672,6 +813,56 @@ func (m *Mesh) upsertEnvironment(environment EnvironmentTelemetry) {
 
 	_ = m.store.SaveEnvironmentTelemetry(m.ctx, environment)
 	m.publishEnvironment(environment)
+}
+
+func (m *Mesh) upsertDeviceTelemetry(sample DeviceTelemetry) {
+	if sample.ReceivedAt.IsZero() {
+		sample.ReceivedAt = time.Now()
+	}
+	m.mu.Lock()
+	m.devices[sample.Node.Num] = sample
+	m.mu.Unlock()
+	_ = m.store.SaveDeviceTelemetry(m.ctx, sample)
+}
+
+func (m *Mesh) upsertPowerTelemetry(sample PowerTelemetry) {
+	if sample.ReceivedAt.IsZero() {
+		sample.ReceivedAt = time.Now()
+	}
+	m.mu.Lock()
+	m.powers[sample.Node.Num] = sample
+	m.mu.Unlock()
+	_ = m.store.SavePowerTelemetry(m.ctx, sample)
+}
+
+func (m *Mesh) upsertAirQualityTelemetry(sample AirQualityTelemetry) {
+	if sample.ReceivedAt.IsZero() {
+		sample.ReceivedAt = time.Now()
+	}
+	m.mu.Lock()
+	m.airs[sample.Node.Num] = sample
+	m.mu.Unlock()
+	_ = m.store.SaveAirQualityTelemetry(m.ctx, sample)
+}
+
+func (m *Mesh) upsertLocalStatsTelemetry(sample LocalStatsTelemetry) {
+	if sample.ReceivedAt.IsZero() {
+		sample.ReceivedAt = time.Now()
+	}
+	m.mu.Lock()
+	m.locals[sample.Node.Num] = sample
+	m.mu.Unlock()
+	_ = m.store.SaveLocalStatsTelemetry(m.ctx, sample)
+}
+
+func (m *Mesh) upsertHealthTelemetry(sample HealthTelemetry) {
+	if sample.ReceivedAt.IsZero() {
+		sample.ReceivedAt = time.Now()
+	}
+	m.mu.Lock()
+	m.healths[sample.Node.Num] = sample
+	m.mu.Unlock()
+	_ = m.store.SaveHealthTelemetry(m.ctx, sample)
 }
 
 func (m *Mesh) upsertChannel(channel Channel) {
@@ -855,6 +1046,84 @@ func convertEnvironmentTelemetry(environment meshtasticapi.EnvironmentTelemetry,
 		Weight:             environment.Weight,
 		Timestamp:          environment.Timestamp,
 		ReceivedAt:         environment.ReceivedAt,
+	}
+}
+
+func convertDeviceTelemetry(sample meshtasticapi.DeviceTelemetry, lookup func(uint32) NodeRef) DeviceTelemetry {
+	return DeviceTelemetry{
+		Node:               lookup(sample.NodeNum),
+		BatteryLevel:       sample.BatteryLevel,
+		Voltage:            sample.Voltage,
+		ChannelUtilization: sample.ChannelUtilization,
+		AirUtilTx:          sample.AirUtilTx,
+		UptimeSeconds:      sample.UptimeSeconds,
+		Timestamp:          sample.Timestamp,
+		ReceivedAt:         sample.ReceivedAt,
+	}
+}
+
+func convertPowerTelemetry(sample meshtasticapi.PowerTelemetry, lookup func(uint32) NodeRef) PowerTelemetry {
+	return PowerTelemetry{
+		Node:       lookup(sample.NodeNum),
+		Ch1Voltage: sample.Ch1Voltage,
+		Ch1Current: sample.Ch1Current,
+		Ch2Voltage: sample.Ch2Voltage,
+		Ch2Current: sample.Ch2Current,
+		Ch3Voltage: sample.Ch3Voltage,
+		Ch3Current: sample.Ch3Current,
+		Timestamp:  sample.Timestamp,
+		ReceivedAt: sample.ReceivedAt,
+	}
+}
+
+func convertAirQualityTelemetry(sample meshtasticapi.AirQualityTelemetry, lookup func(uint32) NodeRef) AirQualityTelemetry {
+	return AirQualityTelemetry{
+		Node:               lookup(sample.NodeNum),
+		Pm10Standard:       sample.Pm10Standard,
+		Pm25Standard:       sample.Pm25Standard,
+		Pm100Standard:      sample.Pm100Standard,
+		Pm10Environmental:  sample.Pm10Environmental,
+		Pm25Environmental:  sample.Pm25Environmental,
+		Pm100Environmental: sample.Pm100Environmental,
+		Particles03um:      sample.Particles03um,
+		Particles05um:      sample.Particles05um,
+		Particles10um:      sample.Particles10um,
+		Particles25um:      sample.Particles25um,
+		Particles50um:      sample.Particles50um,
+		Particles100um:     sample.Particles100um,
+		CO2:                sample.CO2,
+		Timestamp:          sample.Timestamp,
+		ReceivedAt:         sample.ReceivedAt,
+	}
+}
+
+func convertLocalStatsTelemetry(sample meshtasticapi.LocalStatsTelemetry, lookup func(uint32) NodeRef) LocalStatsTelemetry {
+	return LocalStatsTelemetry{
+		Node:               lookup(sample.NodeNum),
+		UptimeSeconds:      sample.UptimeSeconds,
+		ChannelUtilization: sample.ChannelUtilization,
+		AirUtilTx:          sample.AirUtilTx,
+		NumPacketsTx:       sample.NumPacketsTx,
+		NumPacketsRx:       sample.NumPacketsRx,
+		NumPacketsRxBad:    sample.NumPacketsRxBad,
+		NumOnlineNodes:     sample.NumOnlineNodes,
+		NumTotalNodes:      sample.NumTotalNodes,
+		NumRxDupe:          sample.NumRxDupe,
+		NumTxRelay:         sample.NumTxRelay,
+		NumTxRelayCanceled: sample.NumTxRelayCanceled,
+		Timestamp:          sample.Timestamp,
+		ReceivedAt:         sample.ReceivedAt,
+	}
+}
+
+func convertHealthTelemetry(sample meshtasticapi.HealthTelemetry, lookup func(uint32) NodeRef) HealthTelemetry {
+	return HealthTelemetry{
+		Node:        lookup(sample.NodeNum),
+		HeartBPM:    sample.HeartBPM,
+		SpO2:        sample.SpO2,
+		Temperature: sample.Temperature,
+		Timestamp:   sample.Timestamp,
+		ReceivedAt:  sample.ReceivedAt,
 	}
 }
 

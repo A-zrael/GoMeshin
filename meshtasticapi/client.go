@@ -42,6 +42,12 @@ type Client struct {
 	hopLimit uint32
 	channels map[int32]Channel
 	nodes    map[uint32]Node
+	env      map[uint32]EnvironmentTelemetry
+	device   map[uint32]DeviceTelemetry
+	power    map[uint32]PowerTelemetry
+	air      map[uint32]AirQualityTelemetry
+	local    map[uint32]LocalStatsTelemetry
+	health   map[uint32]HealthTelemetry
 	myNode   *MyNode
 }
 
@@ -52,6 +58,11 @@ type Event struct {
 	Node        *Node
 	Position    *Position
 	Environment *EnvironmentTelemetry
+	Device      *DeviceTelemetry
+	Power       *PowerTelemetry
+	AirQuality  *AirQualityTelemetry
+	LocalStats  *LocalStatsTelemetry
+	Health      *HealthTelemetry
 	MyNode      *MyNode
 	Channel     *Channel
 	TraceRoute  *TraceRoute
@@ -68,6 +79,11 @@ const (
 	EventNode           EventType = "node"
 	EventPosition       EventType = "position"
 	EventEnvironment    EventType = "environment"
+	EventDevice         EventType = "device_telemetry"
+	EventPower          EventType = "power_telemetry"
+	EventAirQuality     EventType = "air_quality_telemetry"
+	EventLocalStats     EventType = "local_stats_telemetry"
+	EventHealth         EventType = "health_telemetry"
 	EventMyNode         EventType = "my_node"
 	EventChannel        EventType = "channel"
 	EventTraceRoute     EventType = "traceroute"
@@ -87,6 +103,11 @@ type Packet struct {
 	Text        string
 	Position    *Position
 	Environment *EnvironmentTelemetry
+	Device      *DeviceTelemetry
+	Power       *PowerTelemetry
+	AirQuality  *AirQualityTelemetry
+	LocalStats  *LocalStatsTelemetry
+	Health      *HealthTelemetry
 	RSSI        int32
 	SNR         float32
 	RxTime      time.Time
@@ -137,6 +158,74 @@ type EnvironmentTelemetry struct {
 	Weight             *float32
 	Timestamp          time.Time
 	ReceivedAt         time.Time
+}
+
+type DeviceTelemetry struct {
+	NodeNum            uint32
+	BatteryLevel       *uint32
+	Voltage            *float32
+	ChannelUtilization *float32
+	AirUtilTx          *float32
+	UptimeSeconds      *uint32
+	Timestamp          time.Time
+	ReceivedAt         time.Time
+}
+
+type PowerTelemetry struct {
+	NodeNum    uint32
+	Ch1Voltage *float32
+	Ch1Current *float32
+	Ch2Voltage *float32
+	Ch2Current *float32
+	Ch3Voltage *float32
+	Ch3Current *float32
+	Timestamp  time.Time
+	ReceivedAt time.Time
+}
+
+type AirQualityTelemetry struct {
+	NodeNum            uint32
+	Pm10Standard       *uint32
+	Pm25Standard       *uint32
+	Pm100Standard      *uint32
+	Pm10Environmental  *uint32
+	Pm25Environmental  *uint32
+	Pm100Environmental *uint32
+	Particles03um      *uint32
+	Particles05um      *uint32
+	Particles10um      *uint32
+	Particles25um      *uint32
+	Particles50um      *uint32
+	Particles100um     *uint32
+	CO2                *uint32
+	Timestamp          time.Time
+	ReceivedAt         time.Time
+}
+
+type LocalStatsTelemetry struct {
+	NodeNum            uint32
+	UptimeSeconds      uint32
+	ChannelUtilization float32
+	AirUtilTx          float32
+	NumPacketsTx       uint32
+	NumPacketsRx       uint32
+	NumPacketsRxBad    uint32
+	NumOnlineNodes     uint32
+	NumTotalNodes      uint32
+	NumRxDupe          uint32
+	NumTxRelay         uint32
+	NumTxRelayCanceled uint32
+	Timestamp          time.Time
+	ReceivedAt         time.Time
+}
+
+type HealthTelemetry struct {
+	NodeNum     uint32
+	HeartBPM    *uint32
+	SpO2        *uint32
+	Temperature *float32
+	Timestamp   time.Time
+	ReceivedAt  time.Time
 }
 
 type MyNode struct {
@@ -205,6 +294,12 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 		hopLimit: 3,
 		channels: make(map[int32]Channel),
 		nodes:    make(map[uint32]Node),
+		env:      make(map[uint32]EnvironmentTelemetry),
+		device:   make(map[uint32]DeviceTelemetry),
+		power:    make(map[uint32]PowerTelemetry),
+		air:      make(map[uint32]AirQualityTelemetry),
+		local:    make(map[uint32]LocalStatsTelemetry),
+		health:   make(map[uint32]HealthTelemetry),
 	}
 
 	if err := c.wakeRadio(); err != nil {
@@ -277,6 +372,67 @@ func (c *Client) MyNode() *MyNode {
 
 	node := *c.myNode
 	return &node
+}
+
+func (c *Client) EnvironmentTelemetries() []EnvironmentTelemetry {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+
+	environments := make([]EnvironmentTelemetry, 0, len(c.env))
+	for _, environment := range c.env {
+		environments = append(environments, environment)
+	}
+	return environments
+}
+
+func (c *Client) DeviceTelemetries() []DeviceTelemetry {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	out := make([]DeviceTelemetry, 0, len(c.device))
+	for _, sample := range c.device {
+		out = append(out, sample)
+	}
+	return out
+}
+
+func (c *Client) PowerTelemetries() []PowerTelemetry {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	out := make([]PowerTelemetry, 0, len(c.power))
+	for _, sample := range c.power {
+		out = append(out, sample)
+	}
+	return out
+}
+
+func (c *Client) AirQualityTelemetries() []AirQualityTelemetry {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	out := make([]AirQualityTelemetry, 0, len(c.air))
+	for _, sample := range c.air {
+		out = append(out, sample)
+	}
+	return out
+}
+
+func (c *Client) LocalStatsTelemetries() []LocalStatsTelemetry {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	out := make([]LocalStatsTelemetry, 0, len(c.local))
+	for _, sample := range c.local {
+		out = append(out, sample)
+	}
+	return out
+}
+
+func (c *Client) HealthTelemetries() []HealthTelemetry {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	out := make([]HealthTelemetry, 0, len(c.health))
+	for _, sample := range c.health {
+		out = append(out, sample)
+	}
+	return out
 }
 
 func (c *Client) Close() error {
@@ -438,6 +594,65 @@ func (c *Client) updateState(event Event) {
 		node := *event.Node
 		c.stateMu.Lock()
 		c.nodes[node.Num] = node
+		c.stateMu.Unlock()
+	case EventPosition:
+		if event.Position == nil {
+			return
+		}
+		position := *event.Position
+		c.stateMu.Lock()
+		node := c.nodes[position.NodeNum]
+		node.Num = position.NodeNum
+		node.Position = &position
+		c.nodes[position.NodeNum] = node
+		c.stateMu.Unlock()
+	case EventEnvironment:
+		if event.Environment == nil {
+			return
+		}
+		environment := *event.Environment
+		c.stateMu.Lock()
+		c.env[environment.NodeNum] = environment
+		c.stateMu.Unlock()
+	case EventDevice:
+		if event.Device == nil {
+			return
+		}
+		sample := *event.Device
+		c.stateMu.Lock()
+		c.device[sample.NodeNum] = sample
+		c.stateMu.Unlock()
+	case EventPower:
+		if event.Power == nil {
+			return
+		}
+		sample := *event.Power
+		c.stateMu.Lock()
+		c.power[sample.NodeNum] = sample
+		c.stateMu.Unlock()
+	case EventAirQuality:
+		if event.AirQuality == nil {
+			return
+		}
+		sample := *event.AirQuality
+		c.stateMu.Lock()
+		c.air[sample.NodeNum] = sample
+		c.stateMu.Unlock()
+	case EventLocalStats:
+		if event.LocalStats == nil {
+			return
+		}
+		sample := *event.LocalStats
+		c.stateMu.Lock()
+		c.local[sample.NodeNum] = sample
+		c.stateMu.Unlock()
+	case EventHealth:
+		if event.Health == nil {
+			return
+		}
+		sample := *event.Health
+		c.stateMu.Lock()
+		c.health[sample.NodeNum] = sample
 		c.stateMu.Unlock()
 	}
 }
@@ -695,6 +910,139 @@ func decodeEnvironmentTelemetry(telemetry *meshtastic.Telemetry, nodeNum uint32,
 	}
 }
 
+func decodeDeviceTelemetry(telemetry *meshtastic.Telemetry, nodeNum uint32, receivedAt time.Time) *DeviceTelemetry {
+	metrics := telemetry.GetDeviceMetrics()
+	if metrics == nil {
+		return nil
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := receivedAt
+	if telemetry.GetTime() != 0 {
+		timestamp = time.Unix(int64(telemetry.GetTime()), 0)
+	}
+	return &DeviceTelemetry{
+		NodeNum:            nodeNum,
+		BatteryLevel:       uint32Ptr(metrics.BatteryLevel),
+		Voltage:            float32Ptr(metrics.Voltage),
+		ChannelUtilization: float32Ptr(metrics.ChannelUtilization),
+		AirUtilTx:          float32Ptr(metrics.AirUtilTx),
+		UptimeSeconds:      uint32Ptr(metrics.UptimeSeconds),
+		Timestamp:          timestamp,
+		ReceivedAt:         receivedAt,
+	}
+}
+
+func decodePowerTelemetry(telemetry *meshtastic.Telemetry, nodeNum uint32, receivedAt time.Time) *PowerTelemetry {
+	metrics := telemetry.GetPowerMetrics()
+	if metrics == nil {
+		return nil
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := receivedAt
+	if telemetry.GetTime() != 0 {
+		timestamp = time.Unix(int64(telemetry.GetTime()), 0)
+	}
+	return &PowerTelemetry{
+		NodeNum:    nodeNum,
+		Ch1Voltage: float32Ptr(metrics.Ch1Voltage),
+		Ch1Current: float32Ptr(metrics.Ch1Current),
+		Ch2Voltage: float32Ptr(metrics.Ch2Voltage),
+		Ch2Current: float32Ptr(metrics.Ch2Current),
+		Ch3Voltage: float32Ptr(metrics.Ch3Voltage),
+		Ch3Current: float32Ptr(metrics.Ch3Current),
+		Timestamp:  timestamp,
+		ReceivedAt: receivedAt,
+	}
+}
+
+func decodeAirQualityTelemetry(telemetry *meshtastic.Telemetry, nodeNum uint32, receivedAt time.Time) *AirQualityTelemetry {
+	metrics := telemetry.GetAirQualityMetrics()
+	if metrics == nil {
+		return nil
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := receivedAt
+	if telemetry.GetTime() != 0 {
+		timestamp = time.Unix(int64(telemetry.GetTime()), 0)
+	}
+	return &AirQualityTelemetry{
+		NodeNum:            nodeNum,
+		Pm10Standard:       uint32Ptr(metrics.Pm10Standard),
+		Pm25Standard:       uint32Ptr(metrics.Pm25Standard),
+		Pm100Standard:      uint32Ptr(metrics.Pm100Standard),
+		Pm10Environmental:  uint32Ptr(metrics.Pm10Environmental),
+		Pm25Environmental:  uint32Ptr(metrics.Pm25Environmental),
+		Pm100Environmental: uint32Ptr(metrics.Pm100Environmental),
+		Particles03um:      uint32Ptr(metrics.Particles_03Um),
+		Particles05um:      uint32Ptr(metrics.Particles_05Um),
+		Particles10um:      uint32Ptr(metrics.Particles_10Um),
+		Particles25um:      uint32Ptr(metrics.Particles_25Um),
+		Particles50um:      uint32Ptr(metrics.Particles_50Um),
+		Particles100um:     uint32Ptr(metrics.Particles_100Um),
+		CO2:                uint32Ptr(metrics.Co2),
+		Timestamp:          timestamp,
+		ReceivedAt:         receivedAt,
+	}
+}
+
+func decodeLocalStatsTelemetry(telemetry *meshtastic.Telemetry, nodeNum uint32, receivedAt time.Time) *LocalStatsTelemetry {
+	metrics := telemetry.GetLocalStats()
+	if metrics == nil {
+		return nil
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := receivedAt
+	if telemetry.GetTime() != 0 {
+		timestamp = time.Unix(int64(telemetry.GetTime()), 0)
+	}
+	return &LocalStatsTelemetry{
+		NodeNum:            nodeNum,
+		UptimeSeconds:      metrics.GetUptimeSeconds(),
+		ChannelUtilization: metrics.GetChannelUtilization(),
+		AirUtilTx:          metrics.GetAirUtilTx(),
+		NumPacketsTx:       metrics.GetNumPacketsTx(),
+		NumPacketsRx:       metrics.GetNumPacketsRx(),
+		NumPacketsRxBad:    metrics.GetNumPacketsRxBad(),
+		NumOnlineNodes:     metrics.GetNumOnlineNodes(),
+		NumTotalNodes:      metrics.GetNumTotalNodes(),
+		NumRxDupe:          metrics.GetNumRxDupe(),
+		NumTxRelay:         metrics.GetNumTxRelay(),
+		NumTxRelayCanceled: metrics.GetNumTxRelayCanceled(),
+		Timestamp:          timestamp,
+		ReceivedAt:         receivedAt,
+	}
+}
+
+func decodeHealthTelemetry(telemetry *meshtastic.Telemetry, nodeNum uint32, receivedAt time.Time) *HealthTelemetry {
+	metrics := telemetry.GetHealthMetrics()
+	if metrics == nil {
+		return nil
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	timestamp := receivedAt
+	if telemetry.GetTime() != 0 {
+		timestamp = time.Unix(int64(telemetry.GetTime()), 0)
+	}
+	return &HealthTelemetry{
+		NodeNum:     nodeNum,
+		HeartBPM:    uint32Ptr(metrics.HeartBpm),
+		SpO2:        uint32Ptr(metrics.SpO2),
+		Temperature: float32Ptr(metrics.Temperature),
+		Timestamp:   timestamp,
+		ReceivedAt:  receivedAt,
+	}
+}
+
 func float32Ptr(value *float32) *float32 {
 	if value == nil {
 		return nil
@@ -766,6 +1114,26 @@ func decodeMeshPacket(packet *meshtastic.MeshPacket) Event {
 				event.Type = EventEnvironment
 				event.Packet.Environment = environment
 				event.Environment = environment
+			} else if device := decodeDeviceTelemetry(&telemetry, packet.GetFrom(), event.Packet.RxTime); device != nil {
+				event.Type = EventDevice
+				event.Packet.Device = device
+				event.Device = device
+			} else if power := decodePowerTelemetry(&telemetry, packet.GetFrom(), event.Packet.RxTime); power != nil {
+				event.Type = EventPower
+				event.Packet.Power = power
+				event.Power = power
+			} else if air := decodeAirQualityTelemetry(&telemetry, packet.GetFrom(), event.Packet.RxTime); air != nil {
+				event.Type = EventAirQuality
+				event.Packet.AirQuality = air
+				event.AirQuality = air
+			} else if local := decodeLocalStatsTelemetry(&telemetry, packet.GetFrom(), event.Packet.RxTime); local != nil {
+				event.Type = EventLocalStats
+				event.Packet.LocalStats = local
+				event.LocalStats = local
+			} else if health := decodeHealthTelemetry(&telemetry, packet.GetFrom(), event.Packet.RxTime); health != nil {
+				event.Type = EventHealth
+				event.Packet.Health = health
+				event.Health = health
 			}
 		}
 	case meshtastic.PortNum_TRACEROUTE_APP:
