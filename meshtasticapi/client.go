@@ -531,11 +531,20 @@ func (c *Client) waitForConfig(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("wait for config: %w", ctx.Err())
-		case event := <-c.events:
+		case event, ok := <-c.events:
+			if !ok {
+				return errors.New("event stream closed before config completed")
+			}
 			if event.Type == EventConfigComplete {
 				return nil
 			}
-		case err := <-c.errors:
+		case err, ok := <-c.errors:
+			if !ok {
+				return errors.New("error stream closed before config completed")
+			}
+			if err == nil {
+				return errors.New("radio closed before config completed")
+			}
 			return err
 		case <-c.closed:
 			return errors.New("client closed before config completed")

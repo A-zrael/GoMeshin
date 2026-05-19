@@ -75,6 +75,30 @@ const els = {
   telemetry: document.querySelector("#telemetry"),
   telemetrySummary: document.querySelector("#telemetry-summary"),
   refreshTelemetry: document.querySelector("#refresh-telemetry"),
+  spoofSummary: document.querySelector("#spoof-summary"),
+  spoofTemperatureForm: document.querySelector("#spoof-temperature-form"),
+  spoofTemperatureChannel: document.querySelector("#spoof-temp-channel"),
+  spoofTemperature: document.querySelector("#spoof-temperature"),
+  spoofEnvironmentForm: document.querySelector("#spoof-environment-form"),
+  spoofEnvironmentChannel: document.querySelector("#spoof-env-channel"),
+  spoofEnvironmentTemperature: document.querySelector("#spoof-env-temperature"),
+  spoofEnvironmentHumidity: document.querySelector("#spoof-env-humidity"),
+  spoofEnvironmentPressure: document.querySelector("#spoof-env-pressure"),
+  spoofDeviceForm: document.querySelector("#spoof-device-form"),
+  spoofDeviceChannel: document.querySelector("#spoof-device-channel"),
+  spoofDeviceBattery: document.querySelector("#spoof-device-battery"),
+  spoofDeviceVoltage: document.querySelector("#spoof-device-voltage"),
+  spoofDeviceUtil: document.querySelector("#spoof-device-util"),
+  spoofDeviceAirUtil: document.querySelector("#spoof-device-airutil"),
+  spoofDeviceUptime: document.querySelector("#spoof-device-uptime"),
+  spoofPowerForm: document.querySelector("#spoof-power-form"),
+  spoofPowerChannel: document.querySelector("#spoof-power-channel"),
+  spoofPowerCh1V: document.querySelector("#spoof-power-ch1v"),
+  spoofPowerCh1A: document.querySelector("#spoof-power-ch1a"),
+  spoofPowerCh2V: document.querySelector("#spoof-power-ch2v"),
+  spoofPowerCh2A: document.querySelector("#spoof-power-ch2a"),
+  spoofPowerCh3V: document.querySelector("#spoof-power-ch3v"),
+  spoofPowerCh3A: document.querySelector("#spoof-power-ch3a"),
   settingsSummary: document.querySelector("#settings-summary"),
   refreshSettings: document.querySelector("#refresh-settings"),
   settingsForm: document.querySelector("#settings-form"),
@@ -141,6 +165,10 @@ els.refreshChannels.addEventListener("click", loadChannels);
 els.refreshNodes.addEventListener("click", loadNodes);
 els.refreshWeather.addEventListener("click", loadWeather);
 els.refreshTelemetry.addEventListener("click", loadTelemetry);
+els.spoofTemperatureForm.addEventListener("submit", sendSpoofTemperature);
+els.spoofEnvironmentForm.addEventListener("submit", sendSpoofEnvironment);
+els.spoofDeviceForm.addEventListener("submit", sendSpoofDevice);
+els.spoofPowerForm.addEventListener("submit", sendSpoofPower);
 els.refreshTopology.addEventListener("click", renderTopology);
 els.refreshSettings.addEventListener("click", loadSettings);
 els.settingsForm.addEventListener("submit", saveSettings);
@@ -214,7 +242,8 @@ async function connect() {
 
   try {
     await request("/health");
-    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather(), loadTelemetry(), loadTraceRoutes(), loadSettings()]);
+    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather(), loadTelemetry(), loadTraceRoutes()]);
+    await loadSettings();
     openEvents();
     setStatus(`Connected to ${state.apiURL}`, "connected");
   } catch (error) {
@@ -233,7 +262,6 @@ async function loadSettings() {
     els.settingsSummary.textContent = `${region} • ${preset}`;
   } catch (error) {
     els.settingsSummary.textContent = `Load failed: ${error.message}`;
-    throw error
   }
 }
 
@@ -562,20 +590,159 @@ async function request(path, options = {}) {
 
 function renderChannels() {
   els.channelSelect.replaceChildren();
+  els.spoofTemperatureChannel.replaceChildren();
+  els.spoofEnvironmentChannel.replaceChildren();
+  els.spoofDeviceChannel.replaceChildren();
+  els.spoofPowerChannel.replaceChildren();
   els.channels.replaceChildren();
 
 	for (const channel of state.channels) {
-		const name = displayChannel(channelName(channel));
-		const option = document.createElement("option");
+			const name = displayChannel(channelName(channel));
+			const option = document.createElement("option");
 		option.value = name;
 		option.textContent = name;
-    option.selected = name === state.selectedChannel;
-    els.channelSelect.append(option);
+	    option.selected = name === state.selectedChannel;
+	    els.channelSelect.append(option);
+
+      const spoofTargets = [
+        els.spoofTemperatureChannel,
+        els.spoofEnvironmentChannel,
+        els.spoofDeviceChannel,
+        els.spoofPowerChannel,
+      ];
+      for (const target of spoofTargets) {
+        const spoofOption = document.createElement("option");
+        spoofOption.value = name;
+        spoofOption.textContent = name;
+        target.append(spoofOption);
+      }
 
 		const item = document.createElement("li");
 		item.innerHTML = `<span class="primary">[${channelIndex(channel)}]</span> ${escapeHTML(channelRole(channel))} <span class="muted">${escapeHTML(name)}</span>`;
 		els.channels.append(item);
 	}
+}
+
+async function sendSpoofTemperature(event) {
+  event.preventDefault();
+  const channel = (els.spoofTemperatureChannel.value || "Primary").trim();
+  const temperature = Number.parseFloat(els.spoofTemperature.value);
+  if (!Number.isFinite(temperature)) {
+    setStatus("Enter a numeric temperature", "error");
+    return;
+  }
+  try {
+    const response = await request("/spoof/temperature", {
+      method: "POST",
+      body: {
+        channel,
+        temperature,
+      },
+    });
+    const packetID = response?.id ?? 0;
+    const idHex = Number(packetID).toString(16).padStart(8, "0");
+    els.spoofSummary.textContent = `Sent ${temperature.toFixed(1)}C on ${channel} (id ${idHex})`;
+    setStatus("Spoof telemetry sent", "connected");
+    showToast("Spoof telemetry sent", "ok");
+  } catch (error) {
+    els.spoofSummary.textContent = `Send failed: ${error.message}`;
+    setStatus(`Spoof send failed: ${error.message}`, "error");
+    showToast("Spoof telemetry send failed", "error");
+  }
+}
+
+function parseOptionalFloat(input) {
+  const raw = String(input.value || "").trim();
+  if (!raw) return undefined;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function parseOptionalInt(input) {
+  const raw = String(input.value || "").trim();
+  if (!raw) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+async function sendSpoofEnvironment(event) {
+  event.preventDefault();
+  const channel = (els.spoofEnvironmentChannel.value || "Primary").trim();
+  const temperature = parseOptionalFloat(els.spoofEnvironmentTemperature);
+  const humidity = parseOptionalFloat(els.spoofEnvironmentHumidity);
+  const pressure = parseOptionalFloat(els.spoofEnvironmentPressure);
+  if ([temperature, humidity, pressure].some((value) => Number.isNaN(value))) {
+    setStatus("Environment fields must be numeric", "error");
+    return;
+  }
+  try {
+    await request("/spoof/environment", {
+      method: "POST",
+      body: { channel, temperature, humidity, pressure },
+    });
+    els.spoofSummary.textContent = `Environment spoof sent on ${channel}`;
+    setStatus("Spoof environment sent", "connected");
+    showToast("Spoof environment sent", "ok");
+  } catch (error) {
+    els.spoofSummary.textContent = `Send failed: ${error.message}`;
+    setStatus(`Spoof send failed: ${error.message}`, "error");
+    showToast("Spoof environment failed", "error");
+  }
+}
+
+async function sendSpoofDevice(event) {
+  event.preventDefault();
+  const channel = (els.spoofDeviceChannel.value || "Primary").trim();
+  const batteryLevel = parseOptionalInt(els.spoofDeviceBattery);
+  const voltage = parseOptionalFloat(els.spoofDeviceVoltage);
+  const channelUtilization = parseOptionalFloat(els.spoofDeviceUtil);
+  const airUtilTx = parseOptionalFloat(els.spoofDeviceAirUtil);
+  const uptimeSeconds = parseOptionalInt(els.spoofDeviceUptime);
+  if ([batteryLevel, voltage, channelUtilization, airUtilTx, uptimeSeconds].some((value) => Number.isNaN(value))) {
+    setStatus("Device fields must be numeric", "error");
+    return;
+  }
+  try {
+    await request("/spoof/device", {
+      method: "POST",
+      body: { channel, batteryLevel, voltage, channelUtilization, airUtilTx, uptimeSeconds },
+    });
+    els.spoofSummary.textContent = `Device spoof sent on ${channel}`;
+    setStatus("Spoof device sent", "connected");
+    showToast("Spoof device sent", "ok");
+  } catch (error) {
+    els.spoofSummary.textContent = `Send failed: ${error.message}`;
+    setStatus(`Spoof send failed: ${error.message}`, "error");
+    showToast("Spoof device failed", "error");
+  }
+}
+
+async function sendSpoofPower(event) {
+  event.preventDefault();
+  const channel = (els.spoofPowerChannel.value || "Primary").trim();
+  const ch1Voltage = parseOptionalFloat(els.spoofPowerCh1V);
+  const ch1Current = parseOptionalFloat(els.spoofPowerCh1A);
+  const ch2Voltage = parseOptionalFloat(els.spoofPowerCh2V);
+  const ch2Current = parseOptionalFloat(els.spoofPowerCh2A);
+  const ch3Voltage = parseOptionalFloat(els.spoofPowerCh3V);
+  const ch3Current = parseOptionalFloat(els.spoofPowerCh3A);
+  if ([ch1Voltage, ch1Current, ch2Voltage, ch2Current, ch3Voltage, ch3Current].some((value) => Number.isNaN(value))) {
+    setStatus("Power fields must be numeric", "error");
+    return;
+  }
+  try {
+    await request("/spoof/power", {
+      method: "POST",
+      body: { channel, ch1Voltage, ch1Current, ch2Voltage, ch2Current, ch3Voltage, ch3Current },
+    });
+    els.spoofSummary.textContent = `Power spoof sent on ${channel}`;
+    setStatus("Spoof power sent", "connected");
+    showToast("Spoof power sent", "ok");
+  } catch (error) {
+    els.spoofSummary.textContent = `Send failed: ${error.message}`;
+    setStatus(`Spoof send failed: ${error.message}`, "error");
+    showToast("Spoof power failed", "error");
+  }
 }
 
 function renderNodes() {

@@ -66,6 +66,37 @@ type fixedPositionRequest struct {
 	Altitude  *int32  `json:"altitude,omitempty"`
 }
 
+type spoofTemperatureRequest struct {
+	Channel     string  `json:"channel,omitempty"`
+	Temperature float32 `json:"temperature"`
+}
+
+type spoofEnvironmentRequest struct {
+	Channel     string   `json:"channel,omitempty"`
+	Temperature *float32 `json:"temperature,omitempty"`
+	Humidity    *float32 `json:"humidity,omitempty"`
+	Pressure    *float32 `json:"pressure,omitempty"`
+}
+
+type spoofDeviceRequest struct {
+	Channel            string   `json:"channel,omitempty"`
+	BatteryLevel       *uint32  `json:"batteryLevel,omitempty"`
+	Voltage            *float32 `json:"voltage,omitempty"`
+	ChannelUtilization *float32 `json:"channelUtilization,omitempty"`
+	AirUtilTX          *float32 `json:"airUtilTx,omitempty"`
+	UptimeSeconds      *uint32  `json:"uptimeSeconds,omitempty"`
+}
+
+type spoofPowerRequest struct {
+	Channel    string   `json:"channel,omitempty"`
+	Ch1Voltage *float32 `json:"ch1Voltage,omitempty"`
+	Ch1Current *float32 `json:"ch1Current,omitempty"`
+	Ch2Voltage *float32 `json:"ch2Voltage,omitempty"`
+	Ch2Current *float32 `json:"ch2Current,omitempty"`
+	Ch3Voltage *float32 `json:"ch3Voltage,omitempty"`
+	Ch3Current *float32 `json:"ch3Current,omitempty"`
+}
+
 type eventEnvelope struct {
 	Type string      `json:"type"`
 	Time time.Time   `json:"time"`
@@ -73,6 +104,12 @@ type eventEnvelope struct {
 }
 
 type nodeNum uint32
+
+const (
+	defaultTraceRouteTimeout = 90 * time.Second
+	minTraceRouteTimeout     = 5 * time.Second
+	maxTraceRouteTimeout     = 5 * time.Minute
+)
 
 func main() {
 	port := flag.String("port", "/dev/ttyUSB0", "serial port connected to the Meshtastic radio")
@@ -173,6 +210,10 @@ func (s *apiServer) routes() http.Handler {
 	mux.HandleFunc("/traceroutes/pending", s.handlePendingTraceRoutes)
 	mux.HandleFunc("/settings/radio", s.handleRadioSettings)
 	mux.HandleFunc("/settings/location", s.handleFixedLocation)
+	mux.HandleFunc("/spoof/temperature", s.handleSpoofTemperature)
+	mux.HandleFunc("/spoof/environment", s.handleSpoofEnvironment)
+	mux.HandleFunc("/spoof/device", s.handleSpoofDevice)
+	mux.HandleFunc("/spoof/power", s.handleSpoofPower)
 	mux.HandleFunc("/events", s.handleEvents)
 	if s.webDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(s.webDir)))
@@ -515,7 +556,14 @@ func (s *apiServer) handleTraceRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	timeout := time.Duration(req.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
-		timeout = 90 * time.Second
+		timeout = defaultTraceRouteTimeout
+	} else {
+		if timeout < minTraceRouteTimeout {
+			timeout = minTraceRouteTimeout
+		}
+		if timeout > maxTraceRouteTimeout {
+			timeout = maxTraceRouteTimeout
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
@@ -623,6 +671,97 @@ func (s *apiServer) handleFixedLocation(w http.ResponseWriter, r *http.Request) 
 	default:
 		methodNotAllowed(w, http.MethodPost, http.MethodDelete)
 	}
+}
+
+func (s *apiServer) handleSpoofTemperature(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req spoofTemperatureRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id, err := s.mesh.SendSpoofTemperature(mesh.SpoofTemperatureOptions{
+		Channel:     req.Channel,
+		Temperature: req.Temperature,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"id":          id,
+		"temperature": req.Temperature,
+		"channel":     req.Channel,
+	})
+}
+
+func (s *apiServer) handleSpoofEnvironment(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req spoofEnvironmentRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id, err := s.mesh.SendSpoofEnvironment(mesh.SpoofEnvironmentOptions{
+		Channel:     req.Channel,
+		Temperature: req.Temperature,
+		Humidity:    req.Humidity,
+		Pressure:    req.Pressure,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{"id": id, "channel": req.Channel})
+}
+
+func (s *apiServer) handleSpoofDevice(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req spoofDeviceRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id, err := s.mesh.SendSpoofDevice(mesh.SpoofDeviceOptions{
+		Channel:            req.Channel,
+		BatteryLevel:       req.BatteryLevel,
+		Voltage:            req.Voltage,
+		ChannelUtilization: req.ChannelUtilization,
+		AirUtilTX:          req.AirUtilTX,
+		UptimeSeconds:      req.UptimeSeconds,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{"id": id, "channel": req.Channel})
+}
+
+func (s *apiServer) handleSpoofPower(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req spoofPowerRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id, err := s.mesh.SendSpoofPower(mesh.SpoofPowerOptions{
+		Channel:    req.Channel,
+		Ch1Voltage: req.Ch1Voltage,
+		Ch1Current: req.Ch1Current,
+		Ch2Voltage: req.Ch2Voltage,
+		Ch2Current: req.Ch2Current,
+		Ch3Voltage: req.Ch3Voltage,
+		Ch3Current: req.Ch3Current,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{"id": id, "channel": req.Channel})
 }
 
 func (s *apiServer) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -861,14 +1000,19 @@ func (n *nodeNum) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(data, &value); err != nil {
 			return err
 		}
-		value = strings.TrimPrefix(strings.TrimSpace(value), "!")
+		value = strings.TrimSpace(value)
 		if value == "" {
 			*n = 0
 			return nil
 		}
-		parsed, err := strconv.ParseUint(value, 16, 32)
+		base := 10
+		if strings.HasPrefix(value, "!") {
+			base = 16
+			value = strings.TrimPrefix(value, "!")
+		}
+		parsed, err := strconv.ParseUint(value, base, 32)
 		if err != nil {
-			return fmt.Errorf("node number must be a hex string like !12345678: %w", err)
+			return fmt.Errorf("node number string must be decimal like \"12345678\" or hex like \"!12345678\": %w", err)
 		}
 		*n = nodeNum(parsed)
 		return nil

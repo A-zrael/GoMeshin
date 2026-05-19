@@ -14,6 +14,7 @@ import (
 )
 
 const tracePendingTTL = 5 * time.Minute
+const defaultTraceHopLimit uint32 = 3
 
 type Config struct {
 	Port  string
@@ -59,6 +60,10 @@ type Mesh struct {
 
 	adminMu            sync.Mutex
 	adminConfigWaiters map[uint32]chan meshtastic.Config
+
+	hopLimitMu        sync.RWMutex
+	cachedHopLimit    uint32
+	hasCachedHopLimit bool
 }
 
 type Message struct {
@@ -271,6 +276,37 @@ type FixedPosition struct {
 	Altitude  *int32  `json:"altitude,omitempty"`
 }
 
+type SpoofTemperatureOptions struct {
+	Channel     string
+	Temperature float32
+}
+
+type SpoofEnvironmentOptions struct {
+	Channel     string
+	Temperature *float32
+	Humidity    *float32
+	Pressure    *float32
+}
+
+type SpoofDeviceOptions struct {
+	Channel            string
+	BatteryLevel       *uint32
+	Voltage            *float32
+	ChannelUtilization *float32
+	AirUtilTX          *float32
+	UptimeSeconds      *uint32
+}
+
+type SpoofPowerOptions struct {
+	Channel    string
+	Ch1Voltage *float32
+	Ch1Current *float32
+	Ch2Voltage *float32
+	Ch2Current *float32
+	Ch3Voltage *float32
+	Ch3Current *float32
+}
+
 func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 	if cfg.Store == nil {
 		cfg.Store = NewMemoryStore()
@@ -406,6 +442,133 @@ func (m *Mesh) Send(text string, opts SendOptions) (uint32, error) {
 	return id, nil
 }
 
+func (m *Mesh) SendSpoofTemperature(opts SpoofTemperatureOptions) (uint32, error) {
+	channelIndex, err := m.resolveChannel(opts.Channel)
+	if err != nil {
+		return 0, err
+	}
+
+	telemetry := &meshtastic.Telemetry{
+		Time: uint32(time.Now().Unix()),
+		Variant: &meshtastic.Telemetry_EnvironmentMetrics{
+			EnvironmentMetrics: &meshtastic.EnvironmentMetrics{
+				Temperature: proto.Float32(opts.Temperature),
+			},
+		},
+	}
+	payload, err := proto.Marshal(telemetry)
+	if err != nil {
+		return 0, err
+	}
+
+	return m.radio.SendData(meshtasticapi.SendOptions{
+		To:      meshtasticapi.BroadcastNode,
+		Channel: uint32(channelIndex),
+		Port:    meshtastic.PortNum_TELEMETRY_APP,
+		Payload: payload,
+	})
+}
+
+func (m *Mesh) SendSpoofEnvironment(opts SpoofEnvironmentOptions) (uint32, error) {
+	channelIndex, err := m.resolveChannel(opts.Channel)
+	if err != nil {
+		return 0, err
+	}
+	metrics := &meshtastic.EnvironmentMetrics{}
+	if opts.Temperature != nil {
+		metrics.Temperature = proto.Float32(*opts.Temperature)
+	}
+	if opts.Humidity != nil {
+		metrics.RelativeHumidity = proto.Float32(*opts.Humidity)
+	}
+	if opts.Pressure != nil {
+		metrics.BarometricPressure = proto.Float32(*opts.Pressure)
+	}
+	telemetry := &meshtastic.Telemetry{
+		Time: uint32(time.Now().Unix()),
+		Variant: &meshtastic.Telemetry_EnvironmentMetrics{
+			EnvironmentMetrics: metrics,
+		},
+	}
+	return m.sendSpoofTelemetry(channelIndex, telemetry)
+}
+
+func (m *Mesh) SendSpoofDevice(opts SpoofDeviceOptions) (uint32, error) {
+	channelIndex, err := m.resolveChannel(opts.Channel)
+	if err != nil {
+		return 0, err
+	}
+	metrics := &meshtastic.DeviceMetrics{}
+	if opts.BatteryLevel != nil {
+		metrics.BatteryLevel = proto.Uint32(*opts.BatteryLevel)
+	}
+	if opts.Voltage != nil {
+		metrics.Voltage = proto.Float32(*opts.Voltage)
+	}
+	if opts.ChannelUtilization != nil {
+		metrics.ChannelUtilization = proto.Float32(*opts.ChannelUtilization)
+	}
+	if opts.AirUtilTX != nil {
+		metrics.AirUtilTx = proto.Float32(*opts.AirUtilTX)
+	}
+	if opts.UptimeSeconds != nil {
+		metrics.UptimeSeconds = proto.Uint32(*opts.UptimeSeconds)
+	}
+	telemetry := &meshtastic.Telemetry{
+		Time: uint32(time.Now().Unix()),
+		Variant: &meshtastic.Telemetry_DeviceMetrics{
+			DeviceMetrics: metrics,
+		},
+	}
+	return m.sendSpoofTelemetry(channelIndex, telemetry)
+}
+
+func (m *Mesh) SendSpoofPower(opts SpoofPowerOptions) (uint32, error) {
+	channelIndex, err := m.resolveChannel(opts.Channel)
+	if err != nil {
+		return 0, err
+	}
+	metrics := &meshtastic.PowerMetrics{}
+	if opts.Ch1Voltage != nil {
+		metrics.Ch1Voltage = proto.Float32(*opts.Ch1Voltage)
+	}
+	if opts.Ch1Current != nil {
+		metrics.Ch1Current = proto.Float32(*opts.Ch1Current)
+	}
+	if opts.Ch2Voltage != nil {
+		metrics.Ch2Voltage = proto.Float32(*opts.Ch2Voltage)
+	}
+	if opts.Ch2Current != nil {
+		metrics.Ch2Current = proto.Float32(*opts.Ch2Current)
+	}
+	if opts.Ch3Voltage != nil {
+		metrics.Ch3Voltage = proto.Float32(*opts.Ch3Voltage)
+	}
+	if opts.Ch3Current != nil {
+		metrics.Ch3Current = proto.Float32(*opts.Ch3Current)
+	}
+	telemetry := &meshtastic.Telemetry{
+		Time: uint32(time.Now().Unix()),
+		Variant: &meshtastic.Telemetry_PowerMetrics{
+			PowerMetrics: metrics,
+		},
+	}
+	return m.sendSpoofTelemetry(channelIndex, telemetry)
+}
+
+func (m *Mesh) sendSpoofTelemetry(channelIndex int32, telemetry *meshtastic.Telemetry) (uint32, error) {
+	payload, err := proto.Marshal(telemetry)
+	if err != nil {
+		return 0, err
+	}
+	return m.radio.SendData(meshtasticapi.SendOptions{
+		To:      meshtasticapi.BroadcastNode,
+		Channel: uint32(channelIndex),
+		Port:    meshtastic.PortNum_TELEMETRY_APP,
+		Payload: payload,
+	})
+}
+
 func (m *Mesh) RadioSettings(ctx context.Context) (RadioSettings, error) {
 	lora, err := m.requestConfig(ctx, meshtastic.AdminMessage_LORA_CONFIG)
 	if err != nil {
@@ -420,13 +583,15 @@ func (m *Mesh) RadioSettings(ctx context.Context) (RadioSettings, error) {
 	if loraCfg == nil || deviceCfg == nil {
 		return RadioSettings{}, errors.New("radio returned incomplete settings")
 	}
-	return RadioSettings{
+	settings := RadioSettings{
 		HopLimit:    loraCfg.GetHopLimit(),
 		TxEnabled:   loraCfg.GetTxEnabled(),
 		ModemPreset: loraCfg.GetModemPreset().String(),
 		Region:      loraCfg.GetRegion().String(),
 		Role:        deviceCfg.GetRole().String(),
-	}, nil
+	}
+	m.setCachedHopLimit(settings.HopLimit)
+	return settings, nil
 }
 
 func (m *Mesh) UpdateRadioSettings(ctx context.Context, update RadioSettingsUpdate) (RadioSettings, error) {
@@ -490,7 +655,12 @@ func (m *Mesh) UpdateRadioSettings(ctx context.Context, update RadioSettingsUpda
 		}
 	}
 
-	return m.RadioSettings(ctx)
+	settings, err := m.RadioSettings(ctx)
+	if err != nil {
+		return RadioSettings{}, err
+	}
+	m.setCachedHopLimit(settings.HopLimit)
+	return settings, nil
 }
 
 func (m *Mesh) SetFixedPosition(ctx context.Context, position FixedPosition) error {
@@ -673,10 +843,7 @@ func (m *Mesh) StartTraceRoute(ctx context.Context, opts TraceRouteOptions) (Pen
 	}
 	effectiveHopLimit := opts.HopLimit
 	if effectiveHopLimit == 0 {
-		settings, err := m.RadioSettings(ctx)
-		if err == nil && settings.HopLimit > 0 {
-			effectiveHopLimit = settings.HopLimit
-		}
+		effectiveHopLimit = m.traceHopLimit()
 	}
 
 	channelIndex, err := m.resolveChannel(opts.Channel)
@@ -970,12 +1137,16 @@ func (m *Mesh) Channels(ctx context.Context) ([]Channel, error) {
 
 func (m *Mesh) run() {
 	defer close(m.done)
+	cleanupTicker := time.NewTicker(10 * time.Second)
+	defer cleanupTicker.Stop()
 
 	for {
 		select {
 		case <-m.ctx.Done():
 			m.closeSubscribers()
 			return
+		case <-cleanupTicker.C:
+			m.expirePendingTraces(time.Now())
 		case event, ok := <-m.radio.Events():
 			if !ok {
 				m.closeSubscribers()
@@ -1534,17 +1705,44 @@ func (m *Mesh) forgetTrace(id uint32) {
 func (m *Mesh) PendingTraces() []PendingTrace {
 	m.traceMu.Lock()
 	defer m.traceMu.Unlock()
-	now := time.Now()
 	out := make([]PendingTrace, 0, len(m.tracePending))
-	for id, pending := range m.tracePending {
-		if !pending.ExpiresAt.IsZero() && now.After(pending.ExpiresAt) {
-			delete(m.tracePending, id)
-			delete(m.traces, id)
-			continue
-		}
+	for _, pending := range m.tracePending {
 		out = append(out, pending)
 	}
 	return out
+}
+
+func (m *Mesh) expirePendingTraces(now time.Time) {
+	m.traceMu.Lock()
+	defer m.traceMu.Unlock()
+	for id, pending := range m.tracePending {
+		if pending.ExpiresAt.IsZero() || !now.After(pending.ExpiresAt) {
+			continue
+		}
+		delete(m.tracePending, id)
+		delete(m.traces, id)
+	}
+}
+
+func (m *Mesh) traceHopLimit() uint32 {
+	m.hopLimitMu.RLock()
+	if m.hasCachedHopLimit && m.cachedHopLimit > 0 {
+		hopLimit := m.cachedHopLimit
+		m.hopLimitMu.RUnlock()
+		return hopLimit
+	}
+	m.hopLimitMu.RUnlock()
+	return defaultTraceHopLimit
+}
+
+func (m *Mesh) setCachedHopLimit(hopLimit uint32) {
+	if hopLimit == 0 {
+		return
+	}
+	m.hopLimitMu.Lock()
+	m.cachedHopLimit = hopLimit
+	m.hasCachedHopLimit = true
+	m.hopLimitMu.Unlock()
 }
 
 func (m *Mesh) closeSubscribers() {

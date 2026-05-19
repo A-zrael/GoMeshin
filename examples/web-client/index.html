@@ -31,6 +31,7 @@
       <button class="tab" type="button" data-tab="topology">Topology</button>
       <button class="tab" type="button" data-tab="weather">Weather</button>
       <button class="tab" type="button" data-tab="telemetry">Telemetry</button>
+      <button class="tab" type="button" data-tab="spoof">Spoof</button>
       <button class="tab" type="button" data-tab="settings">Settings</button>
       <button class="tab" type="button" data-tab="nodes">Nodes</button>
       <button class="tab" type="button" data-tab="tools">Debug</button>
@@ -147,6 +148,105 @@
             <button id="refresh-telemetry" type="button">Refresh</button>
           </div>
           <div id="telemetry" class="telemetry-grid"></div>
+        </section>
+      </section>
+
+      <section class="view" data-view="spoof">
+        <section class="pane settings-pane">
+          <div class="pane-header">
+            <div>
+              <h2>Spoof Telemetry</h2>
+              <span id="spoof-summary">Send crafted telemetry values</span>
+            </div>
+          </div>
+          <form id="spoof-temperature-form" class="settings-form">
+            <label>
+              Channel
+              <select id="spoof-temp-channel"></select>
+            </label>
+            <label>
+              Temperature (C)
+              <input id="spoof-temperature" type="number" step="0.1" placeholder="999.0" />
+            </label>
+            <button id="send-spoof-temperature" type="submit">Send Temperature</button>
+          </form>
+          <form id="spoof-environment-form" class="settings-form">
+            <label>
+              Channel
+              <select id="spoof-env-channel"></select>
+            </label>
+            <label>
+              Temperature (C)
+              <input id="spoof-env-temperature" type="number" step="0.1" placeholder="42.0" />
+            </label>
+            <label>
+              Humidity (%)
+              <input id="spoof-env-humidity" type="number" step="0.1" placeholder="87.5" />
+            </label>
+            <label>
+              Pressure (hPa)
+              <input id="spoof-env-pressure" type="number" step="0.1" placeholder="1000.0" />
+            </label>
+            <button id="send-spoof-environment" type="submit">Send Environment</button>
+          </form>
+          <form id="spoof-device-form" class="settings-form">
+            <label>
+              Channel
+              <select id="spoof-device-channel"></select>
+            </label>
+            <label>
+              Battery (%)
+              <input id="spoof-device-battery" type="number" step="1" min="0" max="100" placeholder="3" />
+            </label>
+            <label>
+              Voltage (V)
+              <input id="spoof-device-voltage" type="number" step="0.01" placeholder="2.95" />
+            </label>
+            <label>
+              Channel Util (%)
+              <input id="spoof-device-util" type="number" step="0.1" placeholder="99.0" />
+            </label>
+            <label>
+              Air Util TX (%)
+              <input id="spoof-device-airutil" type="number" step="0.1" placeholder="80.0" />
+            </label>
+            <label>
+              Uptime (s)
+              <input id="spoof-device-uptime" type="number" step="1" min="0" placeholder="123456" />
+            </label>
+            <button id="send-spoof-device" type="submit">Send Device</button>
+          </form>
+          <form id="spoof-power-form" class="settings-form">
+            <label>
+              Channel
+              <select id="spoof-power-channel"></select>
+            </label>
+            <label>
+              Ch1 V
+              <input id="spoof-power-ch1v" type="number" step="0.01" placeholder="12.6" />
+            </label>
+            <label>
+              Ch1 A
+              <input id="spoof-power-ch1a" type="number" step="0.01" placeholder="1.4" />
+            </label>
+            <label>
+              Ch2 V
+              <input id="spoof-power-ch2v" type="number" step="0.01" placeholder="5.0" />
+            </label>
+            <label>
+              Ch2 A
+              <input id="spoof-power-ch2a" type="number" step="0.01" placeholder="0.5" />
+            </label>
+            <label>
+              Ch3 V
+              <input id="spoof-power-ch3v" type="number" step="0.01" placeholder="3.3" />
+            </label>
+            <label>
+              Ch3 A
+              <input id="spoof-power-ch3a" type="number" step="0.01" placeholder="0.2" />
+            </label>
+            <button id="send-spoof-power" type="submit">Send Power</button>
+          </form>
         </section>
       </section>
 
