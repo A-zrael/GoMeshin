@@ -7,8 +7,6 @@
     <link
       rel="stylesheet"
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIINfQGe36fRjTKFZ5VkU7n3tC4d2v3zZX/g="
-      crossorigin=""
     />
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -33,7 +31,7 @@
       <button class="tab" type="button" data-tab="weather">Weather</button>
       <button class="tab" type="button" data-tab="telemetry">Telemetry</button>
       <button class="tab" type="button" data-tab="nodes">Nodes</button>
-      <button class="tab" type="button" data-tab="tools">Tools</button>
+      <button class="tab" type="button" data-tab="tools">Debug</button>
     </nav>
 
     <main class="layout">
@@ -64,7 +62,54 @@
               <h2>Map</h2>
               <span id="map-summary">0 positions</span>
             </div>
-            <button id="fit-map" type="button">Fit</button>
+            <div class="map-controls">
+              <label>
+                Overlay
+                <select id="overlay-type">
+                  <option value="none">None</option>
+                  <option value="density">Node density</option>
+                  <option value="temperature">Temperature</option>
+                  <option value="humidity">Humidity</option>
+                  <option value="battery">Battery</option>
+                  <option value="channelUtilization">Channel util</option>
+                </select>
+              </label>
+              <label>
+                Radius
+                <select id="overlay-cell-km">
+                  <option value="2">2 km</option>
+                  <option value="5" selected>5 km</option>
+                  <option value="10">10 km</option>
+                  <option value="20">20 km</option>
+                </select>
+              </label>
+              <label>
+                Traces
+                <select id="map-traces">
+                  <option value="on" selected>Show</option>
+                  <option value="off">Hide</option>
+                </select>
+              </label>
+              <label>
+                Hop
+                <input id="trace-hop-limit" type="number" min="1" max="7" step="1" value="3" />
+              </label>
+              <label>
+                Timeout
+                <input id="trace-timeout-seconds" type="number" min="10" max="180" step="5" value="90" />
+              </label>
+              <button id="check-pending-traces" type="button">Pending</button>
+              <label>
+                Find node
+                <input id="map-node-search" type="search" placeholder="Name / !id" />
+              </label>
+              <label>
+                Seen <= min
+                <input id="map-seen-minutes" type="number" min="1" step="1" placeholder="all" />
+              </label>
+              <button id="clear-traces" type="button">Clear Traces</button>
+              <button id="fit-map" type="button">Fit</button>
+            </div>
           </div>
           <div id="map" class="map"></div>
         </section>
@@ -117,20 +162,15 @@
 
       <section class="view" data-view="tools">
         <div class="pane-header">
-          <h2>Traceroute</h2>
+          <h2>Debug</h2>
+          <button id="clear-debug-log" type="button">Clear</button>
         </div>
-        <form id="trace-form" class="trace-form">
-          <select id="trace-target"></select>
-          <button type="submit">Run</button>
-        </form>
-        <pre id="trace-output" class="trace-output">No traceroute yet.</pre>
+        <pre id="debug-log" class="trace-output">No API activity yet.</pre>
       </section>
     </main>
 
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-      crossorigin=""
       defer
     ></script>
     <script src="./app.js" defer></script>

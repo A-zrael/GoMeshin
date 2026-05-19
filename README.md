@@ -98,6 +98,9 @@ GET    /telemetry/power
 GET    /telemetry/airquality
 GET    /telemetry/localstats
 GET    /telemetry/health
+GET    /telemetry/environment/history?limit=1000
+GET    /telemetry/device/history?limit=1000
+GET    /telemetry/localstats/history?limit=1000
 POST   /traceroute
 GET    /events
 GET    /events?channel=Primary

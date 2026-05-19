@@ -10,13 +10,37 @@ const state = {
     airquality: [],
     localstats: [],
     health: [],
+    history: {
+      environment: [],
+      device: [],
+      localstats: [],
+    },
   },
   messages: [],
   selectedChannel: "Primary",
   map: null,
   markers: new Map(),
+  overlayLayer: null,
+  traceLayer: null,
+  overlay: {
+    type: "none",
+    cellKm: 5,
+  },
+  tracesVisible: true,
+  traceRoutes: [],
+  mapNodeQuery: "",
+  mapSeenMinutes: 0,
+  debugLog: [],
+  traceToastSeen: new Map(),
+  traceHopLimit: 3,
+  traceTimeoutSeconds: 90,
   mapFitDone: false,
+  reconnectTimer: null,
+  tracing: false,
+  traceCooldownUntil: 0,
 };
+const TRACE_STORAGE_KEY = "gomeshin.traceRoutes.v1";
+const TRACE_STORAGE_LIMIT = 12;
 
 const els = {
   status: document.querySelector("#status"),
@@ -31,6 +55,12 @@ const els = {
   map: document.querySelector("#map"),
   mapSummary: document.querySelector("#map-summary"),
   fitMap: document.querySelector("#fit-map"),
+  overlayType: document.querySelector("#overlay-type"),
+  overlayCellKm: document.querySelector("#overlay-cell-km"),
+  mapTraces: document.querySelector("#map-traces"),
+  mapNodeSearch: document.querySelector("#map-node-search"),
+  mapSeenMinutes: document.querySelector("#map-seen-minutes"),
+  clearTraces: document.querySelector("#clear-traces"),
   weather: document.querySelector("#weather"),
   weatherSummary: document.querySelector("#weather-summary"),
   refreshWeather: document.querySelector("#refresh-weather"),
@@ -39,14 +69,17 @@ const els = {
   refreshTelemetry: document.querySelector("#refresh-telemetry"),
   nodes: document.querySelector("#nodes"),
   nodeSearch: document.querySelector("#node-search"),
-  traceTarget: document.querySelector("#trace-target"),
-  traceForm: document.querySelector("#trace-form"),
-  traceOutput: document.querySelector("#trace-output"),
+  debugLog: document.querySelector("#debug-log"),
+  clearDebugLog: document.querySelector("#clear-debug-log"),
+  traceHopLimit: document.querySelector("#trace-hop-limit"),
+  traceTimeoutSeconds: document.querySelector("#trace-timeout-seconds"),
+  checkPendingTraces: document.querySelector("#check-pending-traces"),
   refreshChannels: document.querySelector("#refresh-channels"),
   refreshNodes: document.querySelector("#refresh-nodes"),
 };
 
 els.apiURL.value = state.apiURL;
+restoreTraceRoutes();
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => activateTab(button.dataset.tab));
@@ -88,28 +121,59 @@ els.refreshNodes.addEventListener("click", loadNodes);
 els.refreshWeather.addEventListener("click", loadWeather);
 els.refreshTelemetry.addEventListener("click", loadTelemetry);
 els.nodeSearch.addEventListener("input", renderNodes);
-els.fitMap.addEventListener("click", () => fitMapToMarkers(true));
-
-els.traceForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const to = els.traceTarget.value;
-  if (!to) return;
-
-  els.traceOutput.textContent = "Waiting for traceroute...";
+els.clearDebugLog.addEventListener("click", () => clearDebugLog());
+els.traceHopLimit.addEventListener("input", () => {
+  const value = Number.parseInt(els.traceHopLimit.value, 10);
+  state.traceHopLimit = Number.isFinite(value) && value > 0 ? value : 3;
+});
+els.traceTimeoutSeconds.addEventListener("input", () => {
+  const value = Number.parseInt(els.traceTimeoutSeconds.value, 10);
+  state.traceTimeoutSeconds = Number.isFinite(value) && value > 0 ? value : 90;
+});
+els.checkPendingTraces.addEventListener("click", async () => {
   try {
-    const route = await request("/traceroute", {
-      method: "POST",
-      body: {
-        to,
-        channel: state.selectedChannel,
-        hopLimit: 3,
-        timeoutSeconds: 90,
-      },
-    });
-    els.traceOutput.textContent = formatTrace(route);
+    const pending = await requestSafeArray("/traceroutes/pending");
+    if (!pending.length) {
+      addDebugLog("Pending traces: none");
+      return;
+    }
+    for (const item of pending) {
+      const id = item.requestID ?? item.RequestID ?? 0;
+      const to = item.to ?? item.To ?? 0;
+      const ch = item.channel ?? item.Channel ?? "";
+      const hop = item.hopLimit ?? item.HopLimit ?? 0;
+      addDebugLog(`Pending trace id=${Number(id).toString(16).padStart(8, "0")} to=${formatNodeID(to)} channel=${ch || "Primary"} hop=${hop}`);
+    }
   } catch (error) {
-    els.traceOutput.textContent = error.message;
+    addDebugLog(`Pending trace check failed: ${error.message}`);
   }
+});
+els.fitMap.addEventListener("click", () => fitMapToMarkers(true));
+els.overlayType.addEventListener("change", () => {
+  state.overlay.type = els.overlayType.value;
+  renderMap();
+});
+els.overlayCellKm.addEventListener("change", () => {
+  state.overlay.cellKm = Number.parseFloat(els.overlayCellKm.value) || 5;
+  renderMap();
+});
+els.mapTraces.addEventListener("change", () => {
+  state.tracesVisible = els.mapTraces.value !== "off";
+  renderMap();
+});
+els.mapNodeSearch.addEventListener("input", () => {
+  state.mapNodeQuery = els.mapNodeSearch.value.trim().toLowerCase();
+  renderMap();
+});
+els.mapSeenMinutes.addEventListener("input", () => {
+  const value = Number.parseInt(els.mapSeenMinutes.value, 10);
+  state.mapSeenMinutes = Number.isFinite(value) && value > 0 ? value : 0;
+  renderMap();
+});
+els.clearTraces.addEventListener("click", () => {
+  state.traceRoutes = [];
+  persistTraceRoutes();
+  renderMap();
 });
 
 async function connect() {
@@ -118,12 +182,19 @@ async function connect() {
 
   try {
     await request("/health");
-    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather(), loadTelemetry()]);
+    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather(), loadTelemetry(), loadTraceRoutes()]);
     openEvents();
     setStatus(`Connected to ${state.apiURL}`, "connected");
   } catch (error) {
     setStatus(error.message, "error");
   }
+}
+
+async function loadTraceRoutes() {
+  const traces = await requestSafeArray("/traceroutes?limit=200");
+  state.traceRoutes = traces.filter((route) => route && typeof route === "object").slice(0, TRACE_STORAGE_LIMIT);
+  persistTraceRoutes();
+  renderMap();
 }
 
 async function loadChannels() {
@@ -160,28 +231,51 @@ async function loadMessages() {
 }
 
 async function loadTelemetry() {
-  const [device, power, airquality, localstats, health] = await Promise.all([
-    request("/telemetry/device"),
-    request("/telemetry/power"),
-    request("/telemetry/airquality"),
-    request("/telemetry/localstats"),
-    request("/telemetry/health"),
+  const [device, power, airquality, localstats, health, envHist, devHist, localHist] = await Promise.all([
+    requestSafeArray("/telemetry/device"),
+    requestSafeArray("/telemetry/power"),
+    requestSafeArray("/telemetry/airquality"),
+    requestSafeArray("/telemetry/localstats"),
+    requestSafeArray("/telemetry/health"),
+    requestSafeArray("/telemetry/environment/history?limit=1000"),
+    requestSafeArray("/telemetry/device/history?limit=1000"),
+    requestSafeArray("/telemetry/localstats/history?limit=1000"),
   ]);
-  state.telemetry.device = Array.isArray(device) ? device : [];
-  state.telemetry.power = Array.isArray(power) ? power : [];
-  state.telemetry.airquality = Array.isArray(airquality) ? airquality : [];
-  state.telemetry.localstats = Array.isArray(localstats) ? localstats : [];
-  state.telemetry.health = Array.isArray(health) ? health : [];
+  state.telemetry.device = device;
+  state.telemetry.power = power;
+  state.telemetry.airquality = airquality;
+  state.telemetry.localstats = localstats;
+  state.telemetry.health = health;
+  state.telemetry.history.environment = envHist;
+  state.telemetry.history.device = devHist;
+  state.telemetry.history.localstats = localHist;
   renderTelemetry();
 }
 
 function openEvents() {
+  if (state.reconnectTimer) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
   const events = new EventSource(`${state.apiURL}/events`);
   state.events = events;
+  events.onopen = () => {
+    setStatus(`Connected to ${state.apiURL}`, "connected");
+    addDebugLog("SSE open /events");
+  };
 
   events.addEventListener("message.received", (event) => {
+    addDebugLog("SSE message.received");
     const envelope = JSON.parse(event.data);
-    state.messages.push(envelope.data);
+    const message = envelope.data;
+    const duplicate = state.messages.some((item) =>
+      (item.id ?? item.ID ?? 0) === (message.id ?? message.ID ?? 0) &&
+      nodeNum(messageFrom(item)) === nodeNum(messageFrom(message)) &&
+      messageText(item) === messageText(message),
+    );
+    if (!duplicate) {
+      state.messages.push(message);
+    }
     if (state.messages.length > 500) {
       state.messages = state.messages.slice(-500);
     }
@@ -189,6 +283,7 @@ function openEvents() {
   });
 
   events.addEventListener("position.updated", (event) => {
+    addDebugLog("SSE position.updated");
     const envelope = JSON.parse(event.data);
     updateNodePosition(envelope.data);
     renderNodes();
@@ -196,6 +291,7 @@ function openEvents() {
   });
 
   events.addEventListener("environment.updated", (event) => {
+    addDebugLog("SSE environment.updated");
     const envelope = JSON.parse(event.data);
     upsertEnvironment(envelope.data);
     updateNodeEnvironment(envelope.data);
@@ -203,9 +299,61 @@ function openEvents() {
     renderNodes();
     renderMap();
   });
+  events.addEventListener("device.updated", (event) => {
+    addDebugLog("SSE device.updated");
+    const envelope = JSON.parse(event.data);
+    upsertTelemetryRow("device", envelope.data);
+    upsertTelemetryHistory("device", envelope.data);
+    renderTelemetry();
+    renderMap();
+  });
+  events.addEventListener("power.updated", (event) => {
+    addDebugLog("SSE power.updated");
+    const envelope = JSON.parse(event.data);
+    upsertTelemetryRow("power", envelope.data);
+    renderTelemetry();
+    renderMap();
+  });
+  events.addEventListener("airquality.updated", (event) => {
+    addDebugLog("SSE airquality.updated");
+    const envelope = JSON.parse(event.data);
+    upsertTelemetryRow("airquality", envelope.data);
+    renderTelemetry();
+    renderMap();
+  });
+  events.addEventListener("localstats.updated", (event) => {
+    addDebugLog("SSE localstats.updated");
+    const envelope = JSON.parse(event.data);
+    upsertTelemetryRow("localstats", envelope.data);
+    upsertTelemetryHistory("localstats", envelope.data);
+    renderTelemetry();
+    renderMap();
+  });
+  events.addEventListener("health.updated", (event) => {
+    addDebugLog("SSE health.updated");
+    const envelope = JSON.parse(event.data);
+    upsertTelemetryRow("health", envelope.data);
+    renderTelemetry();
+    renderMap();
+  });
+  events.addEventListener("trace.updated", (event) => {
+    addDebugLog("SSE trace.updated");
+    const envelope = JSON.parse(event.data);
+    rememberTrace(envelope.data);
+    maybeToastTraceReceived(envelope.data);
+    renderMap();
+  });
 
   events.onerror = () => {
-    setStatus("Event stream disconnected", "error");
+    setStatus("Event stream reconnecting...", "error");
+    addDebugLog("SSE error/reconnect");
+    closeEvents();
+    if (!state.reconnectTimer) {
+      state.reconnectTimer = setTimeout(() => {
+        state.reconnectTimer = null;
+        openEvents();
+      }, 1500);
+    }
   };
 }
 
@@ -216,9 +364,41 @@ function closeEvents() {
   }
 }
 
+function upsertTelemetryRow(kind, sample) {
+  const list = state.telemetry[kind];
+  if (!Array.isArray(list)) return;
+  const key = environmentKey(sample);
+  if (!key) return;
+  const currentIndex = list.findIndex((item) => environmentKey(item) === key);
+  if (currentIndex >= 0) {
+    if (telemetryTime(sample) >= telemetryTime(list[currentIndex])) {
+      list[currentIndex] = sample;
+    }
+  } else {
+    list.unshift(sample);
+  }
+}
+
+function upsertTelemetryHistory(kind, sample) {
+  const map = {
+    environment: "environment",
+    device: "device",
+    localstats: "localstats",
+  };
+  const targetKey = map[kind];
+  if (!targetKey) return;
+  const list = state.telemetry.history[targetKey];
+  if (!Array.isArray(list)) return;
+  list.unshift(sample);
+  if (list.length > 2000) {
+    list.length = 2000;
+  }
+}
+
 async function request(path, options = {}) {
+  const method = options.method || "GET";
   const init = {
-    method: options.method || "GET",
+    method,
     headers: {},
   };
 
@@ -228,11 +408,16 @@ async function request(path, options = {}) {
   }
 
   let response;
+  const startedAt = performance.now();
+  addDebugLog(`HTTP ${method} ${path}`);
   try {
     response = await fetch(`${state.apiURL}${path}`, init);
   } catch (error) {
+    addDebugLog(`HTTP ${method} ${path} FAILED (network)`);
     throw new Error(`Cannot reach ${state.apiURL}. Check that gomeshind is running and CORS allows this page.`);
   }
+  const elapsed = Math.round(performance.now() - startedAt);
+  addDebugLog(`HTTP ${method} ${path} -> ${response.status} (${elapsed}ms)`);
   if (!response.ok) {
     let message = response.statusText;
     try {
@@ -272,39 +457,56 @@ function renderNodes() {
   const nodes = state.nodes.filter((node) => nodeMatches(node, query));
 
   els.nodes.replaceChildren();
-  els.traceTarget.replaceChildren();
-
 	for (const node of nodes) {
-		const nodeID = formatNodeID(nodeNum(node));
 		const label = formatNode(node);
 
     const item = document.createElement("li");
     item.textContent = label;
     els.nodes.append(item);
-
-    const option = document.createElement("option");
-    option.value = nodeID;
-    option.textContent = label;
-    els.traceTarget.append(option);
   }
 }
 
 function renderMap() {
-  const positions = state.nodes
+  const allPositions = state.nodes
     .map((node) => ({ node, position: nodePosition(node) }))
     .filter(({ position }) => hasLatLon(position));
+  const query = (state.mapNodeQuery || "").trim().toLowerCase();
+  const seenMinutes = Number.isFinite(Number(state.mapSeenMinutes)) && Number(state.mapSeenMinutes) > 0
+    ? Number(state.mapSeenMinutes)
+    : 0;
 
-  els.mapSummary.textContent = `${positions.length} positions`;
+  let positions = allPositions.filter(({ node }) => {
+    if (!nodeMatches(node, query)) return false;
+    return nodeMatchesSeenWindow(node, seenMinutes);
+  });
+  if (positions.length === 0 && !query && seenMinutes <= 0) {
+    positions = allPositions;
+  }
+
+  const overlayText = state.overlay.type === "none" ? "no overlay" : `${overlayLabel(state.overlay.type)} @ ${state.overlay.cellKm}km radius`;
+  const seenText = seenMinutes > 0 ? ` • seen<=${seenMinutes}m` : "";
+  els.mapSummary.textContent = `${positions.length}/${allPositions.length} positions${seenText} • ${overlayText}`;
 
   if (!isMapTabActive()) {
     return;
   }
 
   if (positions.length === 0) {
-    clearMapMarkers();
+    if (state.map) {
+      clearMapMarkers();
+      if (state.overlayLayer) state.overlayLayer.clearLayers();
+      if (state.traceLayer) state.traceLayer.clearLayers();
+      if (allPositions.length === 0) {
+        els.mapSummary.textContent = `0/${allPositions.length} positions • ${overlayText}`;
+      } else {
+        els.mapSummary.textContent = `0/${allPositions.length} positions${seenText} • ${overlayText}`;
+      }
+      setTimeout(() => state.map.invalidateSize(), 0);
+      return;
+    }
     const empty = document.createElement("div");
     empty.className = "map-empty";
-    empty.textContent = "No node positions yet.";
+    empty.textContent = allPositions.length === 0 ? "No node positions yet." : "No map nodes match your filters.";
     els.map.replaceChildren();
     els.map.append(empty);
     return;
@@ -406,6 +608,9 @@ function ensureMap() {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(state.map);
+  state.overlayLayer = L.layerGroup().addTo(state.map);
+  state.traceLayer = L.layerGroup().addTo(state.map);
+  state.map.on("popupopen", onMapPopupOpen);
 }
 
 function syncMapMarkers(positions) {
@@ -427,13 +632,14 @@ function syncMapMarkers(positions) {
 
     const label = nodeShortName(node) || nodeLongName(node) || formatNodeID(num);
     const popup = formatMapPopup(node, position);
+    const ageClass = markerAgeClass(node);
     const existing = state.markers.get(key);
     if (existing) {
       existing.setLatLng([lat, lon]);
-      existing.setIcon(nodeIcon(label));
+      existing.setIcon(nodeIcon(label, ageClass));
       existing.setPopupContent(popup);
     } else {
-      state.markers.set(key, L.marker([lat, lon], { icon: nodeIcon(label) }).bindPopup(popup).addTo(state.map));
+      state.markers.set(key, L.marker([lat, lon], { icon: nodeIcon(label, ageClass) }).bindPopup(popup).addTo(state.map));
     }
   }
 
@@ -445,7 +651,67 @@ function syncMapMarkers(positions) {
   }
 
   fitMapToMarkers(false);
+  const overlayCount = renderMapOverlay(positions);
+  const traceCount = renderTraceRoutes();
   setTimeout(() => state.map.invalidateSize(), 0);
+  if (overlayCount > 0) {
+    els.mapSummary.textContent += ` • ${overlayCount} samples`;
+  }
+  if (traceCount > 0) {
+    els.mapSummary.textContent += ` • ${traceCount} trace paths`;
+  }
+}
+
+function onMapPopupOpen(event) {
+  const root = event.popup?.getElement?.();
+  if (!root) return;
+  const button = root.querySelector(".map-trace-btn");
+  if (!button || button.dataset.bound === "1") return;
+  button.dataset.bound = "1";
+  button.addEventListener("click", async () => {
+    const to = button.dataset.traceNode || "";
+    if (!to) return;
+    await runTraceroute(to);
+  });
+}
+
+async function runTraceroute(to) {
+  if (!to) return;
+  const now = Date.now();
+  if (now < state.traceCooldownUntil) {
+    const waitSeconds = Math.max(1, Math.ceil((state.traceCooldownUntil - now) / 1000));
+    const message = `Traceroute cooldown: wait ${waitSeconds}s`;
+    addDebugLog(message);
+    showToast(message, "info");
+    return;
+  }
+  if (state.tracing) return;
+  state.tracing = true;
+  state.traceCooldownUntil = now + 60000;
+  const hopLimit = Math.max(1, Math.min(7, Number(state.traceHopLimit) || 3));
+  const timeoutSeconds = Math.max(10, Math.min(180, Number(state.traceTimeoutSeconds) || 90));
+  addDebugLog(`Traceroute start -> ${to} channel=${state.selectedChannel || "Primary"} hop=${hopLimit} timeout=${timeoutSeconds}s`);
+  showToast(`Traceroute started: ${to}`, "info");
+  try {
+    const route = await request("/traceroute", {
+      method: "POST",
+      body: {
+        to,
+        channel: state.selectedChannel,
+        hopLimit,
+        timeoutSeconds,
+      },
+    });
+    addDebugLog(`Traceroute ok -> ${to} (${formatTrace(route).replace(/\n/g, " | ")})`);
+    maybeToastTraceReceived(route);
+    rememberTrace(route);
+    renderMap();
+  } catch (error) {
+    addDebugLog(`Traceroute failed -> ${to} (${error.message})`);
+    showToast(`Traceroute failed: ${error.message}`, "error");
+  } finally {
+    state.tracing = false;
+  }
 }
 
 function fitMapToMarkers(force) {
@@ -463,15 +729,34 @@ function fitMapToMarkers(force) {
   }
 }
 
-function nodeIcon(label) {
+function nodeIcon(label, ageClass = "mesh-marker--stale") {
   const initial = (label || "?").trim().slice(0, 1).toUpperCase() || "?";
   return L.divIcon({
     className: "",
-    html: `<div class="mesh-marker" title="${escapeHTML(label)}"><span>${escapeHTML(initial)}</span></div>`,
+    html: `<div class="mesh-marker ${escapeHTML(ageClass)}" title="${escapeHTML(label)}"><span>${escapeHTML(initial)}</span></div>`,
     iconSize: [26, 26],
     iconAnchor: [13, 13],
     popupAnchor: [0, -13],
   });
+}
+
+function markerAgeClass(node) {
+  const heard = nodeLastHeard(node);
+  const heardMs = Date.parse(heard || "");
+  if (!Number.isFinite(heardMs)) return "mesh-marker--stale";
+  const ageMinutes = (Date.now() - heardMs) / 60000;
+  if (ageMinutes <= 30) return "mesh-marker--fresh";
+  if (ageMinutes <= 60) return "mesh-marker--warn";
+  return "mesh-marker--stale";
+}
+
+function nodeMatchesSeenWindow(node, minutes) {
+  if (!minutes || minutes <= 0) return true;
+  const heard = nodeLastHeard(node);
+  const heardMs = Date.parse(heard || "");
+  if (!Number.isFinite(heardMs)) return false;
+  const ageMinutes = (Date.now() - heardMs) / 60000;
+  return ageMinutes <= minutes;
 }
 
 function clearMapMarkers() {
@@ -479,6 +764,317 @@ function clearMapMarkers() {
     marker.remove();
   }
   state.markers.clear();
+}
+
+function rememberTrace(route) {
+  if (!route || typeof route !== "object") return;
+  const incomingKey = traceKey(route);
+  if (incomingKey) {
+    const duplicate = state.traceRoutes.some((item) => traceKey(item) === incomingKey);
+    if (duplicate) return;
+  }
+  state.traceRoutes.unshift(route);
+  if (state.traceRoutes.length > TRACE_STORAGE_LIMIT) {
+    state.traceRoutes.length = TRACE_STORAGE_LIMIT;
+  }
+  persistTraceRoutes();
+}
+
+function traceKey(route = {}) {
+  const requestID = route.requestID ?? route.RequestID ?? 0;
+  const from = route.from ?? route.From ?? 0;
+  const to = route.to ?? route.To ?? 0;
+  if (Number(requestID) > 0) {
+    return `id:${Number(requestID)}`;
+  }
+  if (Number(from) > 0 || Number(to) > 0) {
+    return `ft:${Number(from)}:${Number(to)}`;
+  }
+  return "";
+}
+
+function persistTraceRoutes() {
+  try {
+    const trimmed = state.traceRoutes.slice(0, TRACE_STORAGE_LIMIT);
+    window.localStorage.setItem(TRACE_STORAGE_KEY, JSON.stringify(trimmed));
+  } catch {
+    // Ignore storage errors (private mode/quota).
+  }
+}
+
+function restoreTraceRoutes() {
+  try {
+    const raw = window.localStorage.getItem(TRACE_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    state.traceRoutes = parsed
+      .filter((route) => route && typeof route === "object")
+      .slice(0, TRACE_STORAGE_LIMIT);
+  } catch {
+    state.traceRoutes = [];
+  }
+}
+
+function renderMapOverlay(positions = null) {
+  if (!state.map || !state.overlayLayer) return;
+  state.overlayLayer.clearLayers();
+  if (state.overlay.type === "none") return;
+
+  let points = [];
+  try {
+    points = overlayPoints(state.overlay.type, state.overlay.cellKm, positions);
+  } catch {
+    return 0;
+  }
+  if (!points.length) return 0;
+
+  const values = points.map((point) => point.value).filter((value) => Number.isFinite(value));
+  if (!values.length) return 0;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const times = points.map((point) => point.time).filter((value) => Number.isFinite(value));
+  const minTime = times.length ? Math.min(...times) : 0;
+  const maxTime = times.length ? Math.max(...times) : 0;
+
+  points.sort((left, right) => (left.time || 0) - (right.time || 0));
+
+  for (const point of points) {
+    const intensity = max === min ? 0.5 : (point.value - min) / (max - min);
+    const recency = maxTime === minTime ? 1 : (((point.time || minTime) - minTime) / (maxTime - minTime));
+    const confidence = Number.isFinite(point.confidence) ? point.confidence : 0.5;
+    const circle = L.circle([point.lat, point.lon], {
+      radius: state.overlay.cellKm * 1000,
+      color: overlayColor(intensity),
+      weight: 1,
+      fillColor: overlayColor(intensity),
+      fillOpacity: 0.06 + recency * 0.12 + intensity * 0.16 + confidence * 0.22,
+    });
+    circle.bindPopup(
+      `<strong>${escapeHTML(point.label)}</strong><br>` +
+      `${escapeHTML(overlayLabel(state.overlay.type))}: ${escapeHTML(formatOverlayValue(state.overlay.type, point.value))}<br>` +
+      `Sample: ${escapeHTML(formatTime(point.timeISO))}<br>` +
+      `Confidence: ${escapeHTML((confidence * 100).toFixed(0))}%`,
+    );
+    circle.addTo(state.overlayLayer);
+  }
+  return points.length;
+}
+
+function renderTraceRoutes() {
+  if (!state.map || !state.traceLayer) return 0;
+  state.traceLayer.clearLayers();
+  if (!state.tracesVisible || state.traceRoutes.length === 0) return 0;
+
+  let drawn = 0;
+  state.traceRoutes.forEach((route) => {
+    const towards = traceRouteCoordinates(route, "towards");
+    const back = traceRouteCoordinates(route, "back");
+    if (towards.length >= 2) {
+      const line = L.polyline(towards, {
+        color: "#ff4fd8",
+        weight: 5,
+        opacity: 0.98,
+        lineCap: "round",
+        lineJoin: "round",
+      });
+      line.bindPopup(tracePopup(route, "towards", towards.length));
+      line.addTo(state.traceLayer);
+      drawn += 1;
+    }
+    if (back.length >= 2) {
+      const line = L.polyline(back, {
+        color: "#ff9af0",
+        weight: 4,
+        opacity: 0.95,
+        dashArray: "12 8",
+        lineCap: "round",
+        lineJoin: "round",
+      });
+      line.bindPopup(tracePopup(route, "back", back.length));
+      line.addTo(state.traceLayer);
+      drawn += 1;
+    }
+  });
+  return drawn;
+}
+
+function traceRouteCoordinates(route, direction) {
+  const hops = direction === "back"
+    ? (route.back ?? route.Back ?? [])
+    : (route.towards ?? route.Towards ?? []);
+  const points = [];
+  for (const hop of hops) {
+    const node = hop.node ?? hop.Node ?? {};
+    const num = nodeNum(node);
+    const position = positionForNodeNum(num);
+    if (!position) continue;
+    const lat = Number(positionLatitude(position));
+    const lon = Number(positionLongitude(position));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const last = points[points.length - 1];
+    if (!last || last[0] !== lat || last[1] !== lon) {
+      points.push([lat, lon]);
+    }
+  }
+  return points;
+}
+
+function positionForNodeNum(num) {
+  if (!num) return null;
+  const node = state.nodes.find((item) => nodeNum(item) === num);
+  return node ? nodePosition(node) : null;
+}
+
+function tracePopup(route, direction, hops) {
+  const requestID = route.requestID ?? route.RequestID ?? 0;
+  const from = route.from ?? route.From ?? 0;
+  const to = route.to ?? route.To ?? 0;
+  return `<strong>Trace ${escapeHTML(requestID.toString(16).padStart(8, "0"))}</strong><br>` +
+    `${escapeHTML(direction)} • hops with geo: ${hops}<br>` +
+    `from ${escapeHTML(formatNodeID(from))} to ${escapeHTML(formatNodeID(to))}`;
+}
+
+function overlayPoints(type, cellKm, positions = null) {
+  const telemetry = type === "density" ? null : telemetryByNode();
+  const source = Array.isArray(positions)
+    ? positions
+    : state.nodes.map((node) => ({ node, position: nodePosition(node) })).filter(({ position }) => hasLatLon(position));
+  const samples = source.map(({ node, position }) => {
+    const key = nodeNum(node) ? `num:${nodeNum(node)}` : nodeID(node) ? `id:${nodeID(node).toLowerCase()}` : "";
+    const bundle = telemetry && key ? telemetry.get(key) : null;
+    return {
+      lat: Number(positionLatitude(position)),
+      lon: Number(positionLongitude(position)),
+      node,
+      bundle,
+    };
+  }).filter((sample) => Number.isFinite(sample.lat) && Number.isFinite(sample.lon));
+
+  if (type === "density") {
+    const radiusKm = Math.max(0.1, Number(cellKm) || 5);
+    return samples.map((sample) => {
+      let nearby = 0;
+      for (const candidate of samples) {
+        if (haversineKm(sample.lat, sample.lon, candidate.lat, candidate.lon) <= radiusKm) {
+          nearby += 1;
+        }
+      }
+      return {
+        lat: sample.lat,
+        lon: sample.lon,
+        label: sampleNodeLabel(sample.node),
+        value: nearby,
+        time: telemetryTime(sample.bundle?.environment ?? sample.bundle?.device ?? sample.bundle?.localstats ?? {}),
+        timeISO: telemetryReceivedAt(sample.bundle?.environment ?? sample.bundle?.device ?? sample.bundle?.localstats ?? {}),
+        confidence: overlayPointConfidence(type, sample.node, sample.bundle),
+      };
+    });
+  }
+
+  return samples
+    .map((sample) => ({
+      lat: sample.lat,
+      lon: sample.lon,
+      label: sampleNodeLabel(sample.node),
+      value: overlayMetricValue(type, sample.bundle),
+      time: overlayMetricTime(type, sample.bundle),
+      timeISO: overlayMetricTimeISO(type, sample.bundle),
+      confidence: overlayPointConfidence(type, sample.node, sample.bundle),
+    }))
+    .filter((sample) => sample.value !== null && Number.isFinite(sample.value));
+}
+
+function overlayMetricValue(type, bundle) {
+  if (type === "density") return 1;
+  if (!bundle) return null;
+  if (type === "temperature") return environmentTemperature(bundle.environment);
+  if (type === "humidity") return environmentHumidity(bundle.environment);
+  if (type === "battery") return telemetryField(bundle.device, "batteryLevel", "BatteryLevel");
+  if (type === "channelUtilization") return telemetryField(bundle.localstats, "channelUtilization", "ChannelUtilization");
+  return null;
+}
+
+function overlayMetricTime(type, bundle) {
+  if (!bundle) return 0;
+  if (type === "temperature" || type === "humidity") return telemetryTime(bundle.environment);
+  if (type === "battery") return telemetryTime(bundle.device);
+  if (type === "channelUtilization") return telemetryTime(bundle.localstats);
+  return 0;
+}
+
+function overlayMetricTimeISO(type, bundle) {
+  if (!bundle) return "";
+  if (type === "temperature" || type === "humidity") return telemetryReceivedAt(bundle.environment);
+  if (type === "battery") return telemetryReceivedAt(bundle.device);
+  if (type === "channelUtilization") return telemetryReceivedAt(bundle.localstats);
+  return "";
+}
+
+function overlayLabel(type) {
+  if (type === "density") return "Node density";
+  if (type === "temperature") return "Temperature";
+  if (type === "humidity") return "Humidity";
+  if (type === "battery") return "Battery";
+  if (type === "channelUtilization") return "Channel utilization";
+  return "Overlay";
+}
+
+function formatOverlayValue(type, value) {
+  if (type === "density") return formatMaybeInteger(value);
+  if (type === "temperature") return formatMaybeNumber(value, "C", 1);
+  if (type === "humidity") return formatMaybeNumber(value, "%", 1);
+  if (type === "battery") return formatMaybeInteger(value);
+  if (type === "channelUtilization") return formatMaybeNumber(value, "%", 1);
+  return String(value);
+}
+
+function overlayColor(intensity) {
+  const t = Math.max(0, Math.min(1, intensity));
+  const hue = 210 - t * 170;
+  return `hsl(${hue} 80% 55%)`;
+}
+
+function overlayPointConfidence(type, node, bundle) {
+  let base = 0.35;
+  const now = Date.now();
+  const time = overlayMetricTime(type, bundle);
+  if (time > 0) {
+    const ageMinutes = Math.max(0, (now - time) / 60000);
+    const ageScore = Math.exp(-ageMinutes / 90);
+    base += 0.35 * ageScore;
+  }
+
+  const key = nodeNum(node) ? `num:${nodeNum(node)}` : nodeID(node) ? `id:${nodeID(node).toLowerCase()}` : "";
+  if (key) {
+    let historyCount = 0;
+    if (type === "temperature" || type === "humidity") {
+      historyCount = historyByNode(state.telemetry.history.environment, key).length;
+    } else if (type === "battery") {
+      historyCount = historyByNode(state.telemetry.history.device, key).length;
+    } else if (type === "channelUtilization") {
+      historyCount = historyByNode(state.telemetry.history.localstats, key).length;
+    }
+    if (historyCount > 0) {
+      const depthScore = Math.min(1, Math.log10(historyCount + 1) / 2);
+      base += 0.30 * depthScore;
+    }
+  }
+  return Math.max(0.05, Math.min(1, base));
+}
+
+function sampleNodeLabel(node) {
+  return nodeShortName(node) || nodeLongName(node) || nodeID(node) || formatNodeID(nodeNum(node));
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (value) => (value * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function activateTab(name) {
@@ -544,6 +1140,7 @@ function renderWeather() {
   }
 
   for (const environment of environments) {
+    if (!environment || typeof environment !== "object") continue;
     const card = document.createElement("article");
     card.className = "weather-card";
 
@@ -552,7 +1149,7 @@ function renderWeather() {
     const title = document.createElement("h3");
     title.textContent = formatEnvironmentNode(environment);
     const time = document.createElement("span");
-    time.textContent = formatTime(environment.receivedAt ?? environment.ReceivedAt);
+    time.textContent = formatTime(telemetryReceivedAt(environment));
     header.append(title, time);
 
     const metrics = document.createElement("dl");
@@ -582,6 +1179,11 @@ function renderTelemetry() {
     empty.textContent = "No telemetry yet.";
     els.telemetry.append(empty);
     return;
+  }
+
+  const diagnostics = renderTelemetryDiagnosticsCard();
+  if (diagnostics) {
+    els.telemetry.append(diagnostics);
   }
 
   for (const cardData of cards) {
@@ -645,9 +1247,238 @@ function renderTelemetry() {
         ["Temp", formatMaybeNumber(telemetryField(cardData.health, "temperature", "Temperature"), "C", 1)],
       ]));
     }
+    card.append(telemetryTrendSection(cardData));
 
     els.telemetry.append(card);
   }
+}
+
+function renderTelemetryDiagnosticsCard() {
+  const locals = latestTelemetrySamples(state.telemetry.localstats);
+  const devices = latestTelemetrySamples(state.telemetry.device);
+  const avgChannelUtil = averageOf(locals, (sample) => telemetryField(sample, "channelUtilization", "ChannelUtilization"));
+  const avgAirUtil = averageOf(locals, (sample) => telemetryField(sample, "airUtilTx", "AirUtilTx"));
+  const totalOnline = sumOf(locals, (sample) => telemetryField(sample, "numOnlineNodes", "NumOnlineNodes"));
+  const totalNodes = sumOf(locals, (sample) => telemetryField(sample, "numTotalNodes", "NumTotalNodes"));
+  const topTalkers = [...locals]
+    .sort((left, right) => Number(telemetryField(right, "numPacketsTx", "NumPacketsTx") || 0) - Number(telemetryField(left, "numPacketsTx", "NumPacketsTx") || 0))
+    .slice(0, 5);
+  const badRatio = averageOf(locals, (sample) => {
+    const bad = Number(telemetryField(sample, "numPacketsRxBad", "NumPacketsRxBad") || 0);
+    const total = Number(telemetryField(sample, "numPacketsRx", "NumPacketsRx") || 0);
+    if (!total) return null;
+    return (bad / total) * 100;
+  });
+
+  const anomalies = detectTelemetryAnomalies();
+  const clusters = detectGeoClusterAlerts();
+  if (locals.length === 0 && devices.length === 0 && anomalies.length === 0) {
+    return null;
+  }
+
+  const card = document.createElement("article");
+  card.className = "telemetry-card telemetry-diagnostics";
+  const header = document.createElement("div");
+  header.className = "telemetry-card-header";
+  const title = document.createElement("h3");
+  title.textContent = "Mesh Diagnostics";
+  const stamp = document.createElement("span");
+  stamp.className = "telemetry-count";
+  stamp.textContent = `${locals.length} local-stats nodes`;
+  header.append(title, stamp);
+  card.append(header);
+
+  card.append(telemetrySection("Channel Health", [
+    ["Avg Util", formatMaybeNumber(avgChannelUtil, "%", 1)],
+    ["Avg TX Air", formatMaybeNumber(avgAirUtil, "%", 1)],
+    ["Online Sum", formatMaybeInteger(totalOnline)],
+    ["Known Sum", formatMaybeInteger(totalNodes)],
+    ["Bad RX Avg", formatMaybeNumber(badRatio, "%", 1)],
+  ]));
+
+  const talkersSection = document.createElement("section");
+  talkersSection.className = "telemetry-section";
+  const talkersTitle = document.createElement("h4");
+  talkersTitle.textContent = "Top Talkers";
+  talkersSection.append(talkersTitle);
+  if (topTalkers.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "telemetry-empty";
+    empty.textContent = "No local stats packets.";
+    talkersSection.append(empty);
+  } else {
+    const list = document.createElement("ul");
+    list.className = "telemetry-list";
+    for (const sample of topTalkers) {
+      const item = document.createElement("li");
+      const tx = telemetryField(sample, "numPacketsTx", "NumPacketsTx");
+      item.textContent = `${formatEnvironmentNode(sample)}: ${formatMaybeInteger(tx)} TX`;
+      list.append(item);
+    }
+    talkersSection.append(list);
+  }
+  card.append(talkersSection);
+
+  const clusterSection = document.createElement("section");
+  clusterSection.className = "telemetry-section";
+  const clusterTitle = document.createElement("h4");
+  clusterTitle.textContent = "Geo Cluster Alerts";
+  clusterSection.append(clusterTitle);
+  if (clusters.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "telemetry-empty";
+    empty.textContent = "No geo clusters crossing thresholds.";
+    clusterSection.append(empty);
+  } else {
+    const list = document.createElement("ul");
+    list.className = "telemetry-list";
+    for (const cluster of clusters.slice(0, 8)) {
+      const item = document.createElement("li");
+      item.textContent = `${cluster.name}: util ${cluster.avgUtil.toFixed(1)}%, bad RX ${cluster.badRx.toFixed(1)}%, nodes ${cluster.count}`;
+      list.append(item);
+    }
+    clusterSection.append(list);
+  }
+  card.append(clusterSection);
+
+  const anomalySection = document.createElement("section");
+  anomalySection.className = "telemetry-section";
+  const anomalyTitle = document.createElement("h4");
+  anomalyTitle.textContent = "Anomalies";
+  anomalySection.append(anomalyTitle);
+  if (anomalies.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "telemetry-empty";
+    empty.textContent = "No anomalies detected.";
+    anomalySection.append(empty);
+  } else {
+    const list = document.createElement("ul");
+    list.className = "telemetry-list";
+    for (const anomaly of anomalies.slice(0, 10)) {
+      const item = document.createElement("li");
+      item.textContent = `${anomaly.node}: ${anomaly.metric} (${anomaly.value}) z=${anomaly.z.toFixed(1)}`;
+      list.append(item);
+    }
+    anomalySection.append(list);
+  }
+  card.append(anomalySection);
+
+  return card;
+}
+
+function detectTelemetryAnomalies() {
+  const out = [];
+  const envByNode = groupSamplesByNode(state.telemetry.history.environment);
+  const devByNode = groupSamplesByNode(state.telemetry.history.device);
+  for (const [key, samples] of envByNode) {
+    const node = formatEnvironmentNode(samples[0]);
+    const temp = anomalyFromSeries(samples, (sample) => environmentTemperature(sample));
+    if (temp) out.push({ node, metric: "Temperature", ...temp });
+  }
+  for (const [key, samples] of devByNode) {
+    const node = formatEnvironmentNode(samples[0]);
+    const battery = anomalyFromSeries(samples, (sample) => telemetryField(sample, "batteryLevel", "BatteryLevel"));
+    if (battery) out.push({ node, metric: "Battery", ...battery });
+    const util = anomalyFromSeries(samples, (sample) => telemetryField(sample, "channelUtilization", "ChannelUtilization"));
+    if (util) out.push({ node, metric: "Channel Util", ...util });
+  }
+  return out.sort((left, right) => Math.abs(right.z) - Math.abs(left.z));
+}
+
+function detectGeoClusterAlerts() {
+  const telemetry = telemetryByNode();
+  const points = state.nodes
+    .map((node) => ({ node, position: nodePosition(node) }))
+    .filter(({ position }) => hasLatLon(position))
+    .map(({ node, position }) => {
+      const key = nodeNum(node) ? `num:${nodeNum(node)}` : nodeID(node) ? `id:${nodeID(node).toLowerCase()}` : "";
+      const bundle = key ? telemetry.get(key) : null;
+      const local = bundle?.localstats;
+      if (!local) return null;
+      const util = Number(telemetryField(local, "channelUtilization", "ChannelUtilization"));
+      const rx = Number(telemetryField(local, "numPacketsRx", "NumPacketsRx") || 0);
+      const bad = Number(telemetryField(local, "numPacketsRxBad", "NumPacketsRxBad") || 0);
+      const badRx = rx > 0 ? (bad / rx) * 100 : 0;
+      if (!Number.isFinite(util)) return null;
+      return {
+        node,
+        label: sampleNodeLabel(node),
+        lat: Number(positionLatitude(position)),
+        lon: Number(positionLongitude(position)),
+        util,
+        badRx,
+      };
+    })
+    .filter(Boolean);
+
+  const alerts = [];
+  const radiusKm = 8;
+  for (const point of points) {
+    const neighbors = points.filter((candidate) =>
+      haversineKm(point.lat, point.lon, candidate.lat, candidate.lon) <= radiusKm);
+    if (neighbors.length < 3) continue;
+    const avgUtil = neighbors.reduce((sum, sample) => sum + sample.util, 0) / neighbors.length;
+    const badRx = neighbors.reduce((sum, sample) => sum + sample.badRx, 0) / neighbors.length;
+    if (avgUtil < 25 && badRx < 8) continue;
+    alerts.push({
+      name: point.label,
+      avgUtil,
+      badRx,
+      count: neighbors.length,
+      lat: point.lat,
+      lon: point.lon,
+    });
+  }
+  alerts.sort((left, right) => (right.avgUtil + right.badRx) - (left.avgUtil + left.badRx));
+
+  const deduped = [];
+  for (const alert of alerts) {
+    const overlapping = deduped.some((existing) => haversineKm(alert.lat, alert.lon, existing.lat, existing.lon) < 5);
+    if (!overlapping) deduped.push(alert);
+  }
+  return deduped;
+}
+
+function groupSamplesByNode(samples = []) {
+  const grouped = new Map();
+  for (const sample of samples) {
+    const key = environmentKey(sample);
+    if (!key) continue;
+    const bucket = grouped.get(key) || [];
+    bucket.push(sample);
+    grouped.set(key, bucket);
+  }
+  for (const bucket of grouped.values()) {
+    bucket.sort((left, right) => telemetryTime(left) - telemetryTime(right));
+  }
+  return grouped;
+}
+
+function anomalyFromSeries(samples, pick) {
+  if (!samples || samples.length < 9) return null;
+  const values = samples.map((sample) => Number(pick(sample))).filter((value) => Number.isFinite(value));
+  if (values.length < 9) return null;
+  const latest = values[values.length - 1];
+  const baseline = values.slice(0, -1);
+  const mean = baseline.reduce((sum, value) => sum + value, 0) / baseline.length;
+  const variance = baseline.reduce((sum, value) => sum + (value - mean) ** 2, 0) / baseline.length;
+  const std = Math.sqrt(variance);
+  if (!(std > 0)) return null;
+  const z = (latest - mean) / std;
+  if (Math.abs(z) < 3) return null;
+  return { value: latest.toFixed(2), z };
+}
+
+function averageOf(samples, pick) {
+  const values = samples.map((sample) => Number(pick(sample))).filter((value) => Number.isFinite(value));
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function sumOf(samples, pick) {
+  const values = samples.map((sample) => Number(pick(sample))).filter((value) => Number.isFinite(value));
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0);
 }
 
 function telemetryByNode() {
@@ -703,6 +1534,87 @@ function telemetrySection(title, rows) {
   return section;
 }
 
+function telemetryTrendSection(cardData) {
+  const section = document.createElement("section");
+  section.className = "telemetry-section";
+  const h4 = document.createElement("h4");
+  h4.textContent = "Trends";
+  section.append(h4);
+
+  const key = telemetryKeyFromCard(cardData);
+  if (!key) {
+    const empty = document.createElement("div");
+    empty.className = "telemetry-empty";
+    empty.textContent = "No trend history.";
+    section.append(empty);
+    return section;
+  }
+
+  const envHist = historyByNode(state.telemetry.history.environment, key, 16);
+  const devHist = historyByNode(state.telemetry.history.device, key, 16);
+  const localHist = historyByNode(state.telemetry.history.localstats, key, 16);
+
+  const rows = [];
+  const tempSpark = sparklineFromSamples(envHist, (sample) => environmentTemperature(sample));
+  if (tempSpark) rows.push(["Temp", tempSpark]);
+  const battSpark = sparklineFromSamples(devHist, (sample) => telemetryField(sample, "batteryLevel", "BatteryLevel"));
+  if (battSpark) rows.push(["Battery", battSpark]);
+  const utilSpark = sparklineFromSamples(localHist, (sample) => telemetryField(sample, "channelUtilization", "ChannelUtilization"));
+  if (utilSpark) rows.push(["Chan Util", utilSpark]);
+
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "telemetry-empty";
+    empty.textContent = "No trend history.";
+    section.append(empty);
+    return section;
+  }
+
+  const list = document.createElement("ul");
+  list.className = "telemetry-list";
+  for (const [label, spark] of rows) {
+    const item = document.createElement("li");
+    item.textContent = `${label}: ${spark}`;
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
+
+function telemetryKeyFromCard(cardData) {
+  const sample = cardData.environment || cardData.device || cardData.localstats || cardData.power || cardData.airquality || cardData.health;
+  return sample ? environmentKey(sample) : "";
+}
+
+function historyByNode(samples, key, limit = 1000) {
+  if (!Array.isArray(samples) || !key) return [];
+  const out = [];
+  for (const sample of samples) {
+    if (environmentKey(sample) === key) {
+      out.push(sample);
+      if (out.length >= limit) break;
+    }
+  }
+  return out.reverse();
+}
+
+function sparklineFromSamples(samples, pick) {
+  const values = samples.map((sample) => Number(pick(sample))).filter((value) => Number.isFinite(value));
+  if (values.length < 3) return "";
+  return sparkline(values.slice(-16));
+}
+
+function sparkline(values) {
+  const chars = ".:-=+*#%@";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (max === min) return "-".repeat(values.length);
+  return values.map((value) => {
+    const idx = Math.max(0, Math.min(chars.length - 1, Math.round(((value - min) / (max - min)) * (chars.length - 1))));
+    return chars[idx];
+  }).join("");
+}
+
 function activeChannels(channels) {
 	const active = channels.filter((channel) => channelRole(channel) !== "DISABLED");
 	return active.length ? active : [{ index: 0, name: "Primary", role: "PRIMARY" }];
@@ -741,7 +1653,7 @@ function latestEnvironment() {
   const byNode = new Map();
   for (const node of state.nodes) {
     const environment = nodeEnvironment(node);
-    if (environment) {
+    if (environment && typeof environment === "object") {
       const key = environmentKey(environment) || `num:${nodeNum(node)}`;
       if (key) {
         const current = byNode.get(key);
@@ -752,6 +1664,7 @@ function latestEnvironment() {
     }
   }
   for (const environment of state.environment) {
+    if (!environment || typeof environment !== "object") continue;
     const key = environmentKey(environment);
     if (key) {
       const current = byNode.get(key);
@@ -810,12 +1723,19 @@ function formatMapPopup(node, position) {
   const num = nodeNum(node);
   const label = nodeShortName(node) || nodeLongName(node) || formatNodeID(num);
   const weather = formatEnvironmentSummary(nodeEnvironment(node));
+  const lastHeard = nodeLastHeard(node);
   const lines = [
     `<strong>${escapeHTML(label)}</strong>${escapeHTML(formatNodeID(num))}`,
     escapeHTML(formatLatLon(position)),
   ];
+  if (lastHeard) {
+    lines.push(`Last heard: ${escapeHTML(formatTime(lastHeard))}`);
+  }
   if (weather) {
     lines.push(escapeHTML(weather));
+  }
+  if (num) {
+    lines.push(`<button type="button" class="map-trace-btn" data-trace-node="${escapeHTML(formatNodeID(num))}">Run traceroute</button>`);
   }
   return lines.join("<br>");
 }
@@ -823,7 +1743,16 @@ function formatMapPopup(node, position) {
 function formatEnvironmentNode(environment) {
   const node = environmentNode(environment);
   const num = nodeNum(node);
-  return nodeShortName(node) || nodeLongName(node) || formatNodeID(num);
+  return nodeShortName(node) || nodeLongName(node) || nodeID(node) || formatNodeID(num);
+}
+
+async function requestSafeArray(path) {
+  try {
+    const payload = await request(path);
+    return Array.isArray(payload) ? payload : [];
+  } catch {
+    return [];
+  }
 }
 
 function formatEnvironmentSummary(environment) {
@@ -867,6 +1796,71 @@ function formatTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleString();
+}
+
+function addDebugLog(message) {
+  const line = `${new Date().toLocaleTimeString()}  ${message}`;
+  state.debugLog.push(line);
+  if (state.debugLog.length > 500) {
+    state.debugLog = state.debugLog.slice(-500);
+  }
+  renderDebugLog();
+}
+
+function clearDebugLog() {
+  state.debugLog = [];
+  renderDebugLog();
+}
+
+function renderDebugLog() {
+  if (!els.debugLog) return;
+  if (!state.debugLog.length) {
+    els.debugLog.textContent = "No API activity yet.";
+    return;
+  }
+  els.debugLog.textContent = state.debugLog.join("\n");
+  els.debugLog.scrollTop = els.debugLog.scrollHeight;
+}
+
+function maybeToastTraceReceived(route) {
+  const id = traceRequestID(route);
+  if (!id) {
+    showToast("Traceroute received", "ok");
+    return;
+  }
+  const now = Date.now();
+  const seenAt = state.traceToastSeen.get(id) || 0;
+  if (now-seenAt < 5000) return;
+  state.traceToastSeen.set(id, now);
+  if (state.traceToastSeen.size > 200) {
+    const oldest = [...state.traceToastSeen.entries()].sort((a, b) => a[1] - b[1]).slice(0, 100);
+    for (const [key] of oldest) state.traceToastSeen.delete(key);
+  }
+  showToast(`Traceroute received: ${id}`, "ok");
+}
+
+function traceRequestID(route = {}) {
+  const id = route.requestID ?? route.RequestID;
+  if (!Number.isFinite(Number(id)) || Number(id) <= 0) return "";
+  return Number(id).toString(16).padStart(8, "0");
+}
+
+function showToast(message, kind = "info") {
+  let stack = document.querySelector(".toast-stack");
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.className = "toast-stack";
+    document.body.append(stack);
+  }
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${kind}`;
+  toast.textContent = message;
+  stack.append(toast);
+  setTimeout(() => toast.classList.add("show"), 0);
+  setTimeout(() => {
+    toast.classList.remove("show");
+    setTimeout(() => toast.remove(), 180);
+  }, 2600);
 }
 
 function nodeMatches(node, query) {
@@ -945,7 +1939,27 @@ function nodeEnvironment(node = {}) {
 	return node.environment ?? node.Environment ?? null;
 }
 
+function nodeLastHeard(node = {}) {
+  let best = parseTimeValue(node.lastSeen ?? node.LastSeen);
+  best = maxTimeValue(best, parseTimeValue(nodePosition(node)?.receivedAt ?? nodePosition(node)?.ReceivedAt));
+  best = maxTimeValue(best, parseTimeValue(nodeEnvironment(node)?.receivedAt ?? nodeEnvironment(node)?.ReceivedAt));
+  return best || "";
+}
+
+function parseTimeValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function maxTimeValue(left, right) {
+  if (!left) return right || "";
+  if (!right) return left || "";
+  return Date.parse(right) > Date.parse(left) ? right : left;
+}
+
 function environmentNode(environment = {}) {
+  if (!environment || typeof environment !== "object") return {};
 	return environment.node ?? environment.Node ?? {};
 }
 
@@ -1035,6 +2049,7 @@ function environmentKey(environment = {}) {
 }
 
 function environmentTime(environment = {}) {
+  if (!environment || typeof environment !== "object") return 0;
 	const received = Date.parse(environment.receivedAt ?? environment.ReceivedAt ?? "");
 	if (Number.isFinite(received)) {
 		return received;

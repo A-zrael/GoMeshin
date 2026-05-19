@@ -151,9 +151,14 @@ func (s *apiServer) routes() http.Handler {
 	mux.HandleFunc("/telemetry/airquality", s.handleAirQualityTelemetry)
 	mux.HandleFunc("/telemetry/localstats", s.handleLocalStatsTelemetry)
 	mux.HandleFunc("/telemetry/health", s.handleHealthTelemetry)
+	mux.HandleFunc("/telemetry/environment/history", s.handleEnvironmentTelemetryHistory)
+	mux.HandleFunc("/telemetry/device/history", s.handleDeviceTelemetryHistory)
+	mux.HandleFunc("/telemetry/localstats/history", s.handleLocalStatsTelemetryHistory)
 	mux.HandleFunc("/channels", s.handleChannels)
 	mux.HandleFunc("/channels/", s.handleChannel)
 	mux.HandleFunc("/traceroute", s.handleTraceRoute)
+	mux.HandleFunc("/traceroutes", s.handleTraceRoutes)
+	mux.HandleFunc("/traceroutes/pending", s.handlePendingTraceRoutes)
 	mux.HandleFunc("/events", s.handleEvents)
 	if s.webDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(s.webDir)))
@@ -347,6 +352,96 @@ func (s *apiServer) handleHealthTelemetry(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, samples)
 }
 
+func (s *apiServer) handleEnvironmentTelemetryHistory(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	node, limit, err := parseHistoryQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	samples, err := s.mesh.EnvironmentTelemetryHistory(r.Context(), node, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, samples)
+}
+
+func (s *apiServer) handleDeviceTelemetryHistory(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	node, limit, err := parseHistoryQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	samples, err := s.mesh.DeviceTelemetryHistory(r.Context(), node, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, samples)
+}
+
+func (s *apiServer) handleLocalStatsTelemetryHistory(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	node, limit, err := parseHistoryQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	samples, err := s.mesh.LocalStatsTelemetryHistory(r.Context(), node, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, samples)
+}
+
+func parseHistoryQuery(r *http.Request) (uint32, int, error) {
+	var node uint32
+	if value := strings.TrimSpace(r.URL.Query().Get("node")); value != "" {
+		parsed, err := parseNodeQueryValue(value)
+		if err != nil {
+			return 0, 0, err
+		}
+		node = parsed
+	}
+	limit := 400
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 || parsed > 5000 {
+			return 0, 0, errors.New("limit must be an integer between 1 and 5000")
+		}
+		limit = parsed
+	}
+	return node, limit, nil
+}
+
+func parseNodeQueryValue(value string) (uint32, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	if strings.HasPrefix(value, "!") {
+		parsed, err := strconv.ParseUint(strings.TrimPrefix(value, "!"), 16, 32)
+		if err != nil {
+			return 0, fmt.Errorf("invalid node query value %q", value)
+		}
+		return uint32(parsed), nil
+	}
+	parsed, err := strconv.ParseUint(value, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid node query value %q", value)
+	}
+	return uint32(parsed), nil
+}
+
 func (s *apiServer) handleChannels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -417,10 +512,35 @@ func (s *apiServer) handleTraceRoute(w http.ResponseWriter, r *http.Request) {
 		HopLimit: req.HopLimit,
 	})
 	if err != nil {
-		writeError(w, http.StatusGatewayTimeout, err)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			writeError(w, http.StatusGatewayTimeout, err)
+			return
+		}
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, route)
+}
+
+func (s *apiServer) handleTraceRoutes(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	limit := queryInt(r.URL.Query(), "limit", 200)
+	node := uint32(queryInt(r.URL.Query(), "node", 0))
+	routes, err := s.mesh.TraceRoutes(r.Context(), node, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, routes)
+}
+
+func (s *apiServer) handlePendingTraceRoutes(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.mesh.PendingTraces())
 }
 
 func (s *apiServer) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -439,6 +559,18 @@ func (s *apiServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer unsubscribePositions()
 	environments, unsubscribeEnvironments := s.mesh.SubscribeEnvironment(64)
 	defer unsubscribeEnvironments()
+	devices, unsubscribeDevices := s.mesh.SubscribeDevice(64)
+	defer unsubscribeDevices()
+	powers, unsubscribePowers := s.mesh.SubscribePower(64)
+	defer unsubscribePowers()
+	airs, unsubscribeAirs := s.mesh.SubscribeAir(64)
+	defer unsubscribeAirs()
+	locals, unsubscribeLocals := s.mesh.SubscribeLocalStats(64)
+	defer unsubscribeLocals()
+	healths, unsubscribeHealths := s.mesh.SubscribeHealth(64)
+	defer unsubscribeHealths()
+	traces, unsubscribeTraces := s.mesh.SubscribeTraces(64)
+	defer unsubscribeTraces()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -496,6 +628,54 @@ func (s *apiServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
+		case sample, ok := <-devices:
+			if !ok {
+				return
+			}
+			if err := writeSSE(w, "device.updated", eventEnvelope{Type: "device.updated", Time: time.Now(), Data: sample}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case sample, ok := <-powers:
+			if !ok {
+				return
+			}
+			if err := writeSSE(w, "power.updated", eventEnvelope{Type: "power.updated", Time: time.Now(), Data: sample}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case sample, ok := <-airs:
+			if !ok {
+				return
+			}
+			if err := writeSSE(w, "airquality.updated", eventEnvelope{Type: "airquality.updated", Time: time.Now(), Data: sample}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case sample, ok := <-locals:
+			if !ok {
+				return
+			}
+			if err := writeSSE(w, "localstats.updated", eventEnvelope{Type: "localstats.updated", Time: time.Now(), Data: sample}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case sample, ok := <-healths:
+			if !ok {
+				return
+			}
+			if err := writeSSE(w, "health.updated", eventEnvelope{Type: "health.updated", Time: time.Now(), Data: sample}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case route, ok := <-traces:
+			if !ok {
+				return
+			}
+			if err := writeSSE(w, "trace.updated", eventEnvelope{Type: "trace.updated", Time: time.Now(), Data: route}); err != nil {
+				return
+			}
+			flusher.Flush()
 		}
 	}
 }
@@ -536,6 +716,18 @@ func allowMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 		return false
 	}
 	return true
+}
+
+func queryInt(values url.Values, key string, fallback int) int {
+	raw := strings.TrimSpace(values.Get(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func methodNotAllowed(w http.ResponseWriter, methods ...string) {

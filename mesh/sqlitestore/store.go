@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"meshin/mesh"
@@ -116,6 +117,32 @@ CREATE TABLE IF NOT EXISTS environment_telemetry (
 );
 
 CREATE INDEX IF NOT EXISTS environment_telemetry_received_at_idx ON environment_telemetry(received_at);
+CREATE TABLE IF NOT EXISTS environment_telemetry_history (
+	node_num INTEGER NOT NULL,
+	node_id TEXT NOT NULL,
+	node_long_name TEXT NOT NULL,
+	node_short_name TEXT NOT NULL,
+	temperature REAL,
+	relative_humidity REAL,
+	barometric_pressure REAL,
+	gas_resistance REAL,
+	voltage REAL,
+	current REAL,
+	iaq INTEGER,
+	distance REAL,
+	lux REAL,
+	white_lux REAL,
+	ir_lux REAL,
+	uv_lux REAL,
+	wind_direction INTEGER,
+	wind_speed REAL,
+	wind_gust REAL,
+	wind_lull REAL,
+	weight REAL,
+	timestamp INTEGER NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS environment_telemetry_history_node_received_idx ON environment_telemetry_history(node_num, received_at DESC);
 
 CREATE TABLE IF NOT EXISTS device_telemetry (
 	node_num INTEGER PRIMARY KEY,
@@ -131,6 +158,20 @@ CREATE TABLE IF NOT EXISTS device_telemetry (
 	received_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS device_telemetry_received_at_idx ON device_telemetry(received_at);
+CREATE TABLE IF NOT EXISTS device_telemetry_history (
+	node_num INTEGER NOT NULL,
+	node_id TEXT NOT NULL,
+	node_long_name TEXT NOT NULL,
+	node_short_name TEXT NOT NULL,
+	battery_level INTEGER,
+	voltage REAL,
+	channel_utilization REAL,
+	air_util_tx REAL,
+	uptime_seconds INTEGER,
+	timestamp INTEGER NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS device_telemetry_history_node_received_idx ON device_telemetry_history(node_num, received_at DESC);
 
 CREATE TABLE IF NOT EXISTS power_telemetry (
 	node_num INTEGER PRIMARY KEY,
@@ -191,6 +232,26 @@ CREATE TABLE IF NOT EXISTS local_stats_telemetry (
 	received_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS local_stats_telemetry_received_at_idx ON local_stats_telemetry(received_at);
+CREATE TABLE IF NOT EXISTS local_stats_telemetry_history (
+	node_num INTEGER NOT NULL,
+	node_id TEXT NOT NULL,
+	node_long_name TEXT NOT NULL,
+	node_short_name TEXT NOT NULL,
+	uptime_seconds INTEGER NOT NULL,
+	channel_utilization REAL NOT NULL,
+	air_util_tx REAL NOT NULL,
+	num_packets_tx INTEGER NOT NULL,
+	num_packets_rx INTEGER NOT NULL,
+	num_packets_rx_bad INTEGER NOT NULL,
+	num_online_nodes INTEGER NOT NULL,
+	num_total_nodes INTEGER NOT NULL,
+	num_rx_dupe INTEGER NOT NULL,
+	num_tx_relay INTEGER NOT NULL,
+	num_tx_relay_canceled INTEGER NOT NULL,
+	timestamp INTEGER NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS local_stats_telemetry_history_node_received_idx ON local_stats_telemetry_history(node_num, received_at DESC);
 
 CREATE TABLE IF NOT EXISTS health_telemetry (
 	node_num INTEGER PRIMARY KEY,
@@ -204,6 +265,15 @@ CREATE TABLE IF NOT EXISTS health_telemetry (
 	received_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS health_telemetry_received_at_idx ON health_telemetry(received_at);
+
+CREATE TABLE IF NOT EXISTS trace_routes (
+	request_id INTEGER NOT NULL,
+	from_num INTEGER NOT NULL,
+	to_num INTEGER NOT NULL,
+	received_at INTEGER NOT NULL,
+	payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trace_routes_received_at_idx ON trace_routes(received_at DESC);
 `)
 	return err
 }
@@ -278,6 +348,36 @@ ON CONFLICT(idx) DO UPDATE SET
 		boolInt(channel.DownlinkEnabled),
 	)
 	return err
+}
+
+func (s *Store) SaveTraceRoute(ctx context.Context, route mesh.TraceRoute) error {
+	receivedAt := route.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	payload, err := json.Marshal(route)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO trace_routes (
+	request_id, from_num, to_num, received_at, payload_json
+) VALUES (?, ?, ?, ?, ?)`,
+		route.RequestID,
+		route.From,
+		route.To,
+		receivedAt.Unix(),
+		string(payload),
+	)
+	if err != nil {
+		return err
+	}
+	_, _ = s.db.ExecContext(ctx, `
+DELETE FROM trace_routes
+WHERE rowid NOT IN (
+	SELECT rowid FROM trace_routes ORDER BY received_at DESC LIMIT 5000
+)`)
+	return nil
 }
 
 func (s *Store) SavePosition(ctx context.Context, position mesh.Position) error {
@@ -393,6 +493,41 @@ ON CONFLICT(node_num) DO UPDATE SET
 		timestamp.Unix(),
 		receivedAt.Unix(),
 	)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO environment_telemetry_history (
+	node_num, node_id, node_long_name, node_short_name,
+	temperature, relative_humidity, barometric_pressure, gas_resistance,
+	voltage, current, iaq, distance, lux, white_lux, ir_lux, uv_lux,
+	wind_direction, wind_speed, wind_gust, wind_lull, weight,
+	timestamp, received_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		environment.Node.Num,
+		environment.Node.ID,
+		environment.Node.LongName,
+		environment.Node.ShortName,
+		nullableFloat32(environment.Temperature),
+		nullableFloat32(environment.RelativeHumidity),
+		nullableFloat32(environment.BarometricPressure),
+		nullableFloat32(environment.GasResistance),
+		nullableFloat32(environment.Voltage),
+		nullableFloat32(environment.Current),
+		nullableUint32(environment.IAQ),
+		nullableFloat32(environment.Distance),
+		nullableFloat32(environment.Lux),
+		nullableFloat32(environment.WhiteLux),
+		nullableFloat32(environment.IRLux),
+		nullableFloat32(environment.UVLux),
+		nullableUint32(environment.WindDirection),
+		nullableFloat32(environment.WindSpeed),
+		nullableFloat32(environment.WindGust),
+		nullableFloat32(environment.WindLull),
+		nullableFloat32(environment.Weight),
+		timestamp.Unix(),
+		receivedAt.Unix(),
+	)
 	return err
 }
 
@@ -421,6 +556,18 @@ ON CONFLICT(node_num) DO UPDATE SET
 	uptime_seconds = excluded.uptime_seconds,
 	timestamp = excluded.timestamp,
 	received_at = excluded.received_at`,
+		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
+		nullableUint32(sample.BatteryLevel), nullableFloat32(sample.Voltage), nullableFloat32(sample.ChannelUtilization),
+		nullableFloat32(sample.AirUtilTx), nullableUint32(sample.UptimeSeconds), timestamp.Unix(), receivedAt.Unix(),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO device_telemetry_history (
+	node_num, node_id, node_long_name, node_short_name,
+	battery_level, voltage, channel_utilization, air_util_tx, uptime_seconds, timestamp, received_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
 		nullableUint32(sample.BatteryLevel), nullableFloat32(sample.Voltage), nullableFloat32(sample.ChannelUtilization),
 		nullableFloat32(sample.AirUtilTx), nullableUint32(sample.UptimeSeconds), timestamp.Unix(), receivedAt.Unix(),
@@ -541,6 +688,21 @@ ON CONFLICT(node_num) DO UPDATE SET
 	num_tx_relay_canceled = excluded.num_tx_relay_canceled,
 	timestamp = excluded.timestamp,
 	received_at = excluded.received_at`,
+		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
+		sample.UptimeSeconds, sample.ChannelUtilization, sample.AirUtilTx, sample.NumPacketsTx, sample.NumPacketsRx, sample.NumPacketsRxBad,
+		sample.NumOnlineNodes, sample.NumTotalNodes, sample.NumRxDupe, sample.NumTxRelay, sample.NumTxRelayCanceled,
+		timestamp.Unix(), receivedAt.Unix(),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO local_stats_telemetry_history (
+	node_num, node_id, node_long_name, node_short_name,
+	uptime_seconds, channel_utilization, air_util_tx, num_packets_tx, num_packets_rx, num_packets_rx_bad,
+	num_online_nodes, num_total_nodes, num_rx_dupe, num_tx_relay, num_tx_relay_canceled,
+	timestamp, received_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sample.Node.Num, sample.Node.ID, sample.Node.LongName, sample.Node.ShortName,
 		sample.UptimeSeconds, sample.ChannelUtilization, sample.AirUtilTx, sample.NumPacketsTx, sample.NumPacketsRx, sample.NumPacketsRxBad,
 		sample.NumOnlineNodes, sample.NumTotalNodes, sample.NumRxDupe, sample.NumTxRelay, sample.NumTxRelayCanceled,
@@ -956,6 +1118,131 @@ FROM health_telemetry ORDER BY received_at DESC`)
 	return out, rows.Err()
 }
 
+func (s *Store) EnvironmentTelemetryHistory(ctx context.Context, nodeNum uint32, limit int) ([]mesh.EnvironmentTelemetry, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	query := `
+SELECT node_num, node_id, node_long_name, node_short_name,
+	temperature, relative_humidity, barometric_pressure, gas_resistance,
+	voltage, current, iaq, distance, lux, white_lux, ir_lux, uv_lux,
+	wind_direction, wind_speed, wind_gust, wind_lull, weight,
+	timestamp, received_at
+FROM environment_telemetry_history`
+	args := make([]interface{}, 0, 2)
+	if nodeNum != 0 {
+		query += ` WHERE node_num = ?`
+		args = append(args, nodeNum)
+	}
+	query += ` ORDER BY received_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mesh.EnvironmentTelemetry
+	for rows.Next() {
+		var sample mesh.EnvironmentTelemetry
+		var temperature, relativeHumidity, barometricPressure, gasResistance, voltage, current, distance, lux, whiteLux, irLux, uvLux, windSpeed, windGust, windLull, weight sql.NullFloat64
+		var iaq, windDirection sql.NullInt64
+		var timestamp, receivedAt int64
+		if err := rows.Scan(&sample.Node.Num, &sample.Node.ID, &sample.Node.LongName, &sample.Node.ShortName, &temperature, &relativeHumidity, &barometricPressure, &gasResistance, &voltage, &current, &iaq, &distance, &lux, &whiteLux, &irLux, &uvLux, &windDirection, &windSpeed, &windGust, &windLull, &weight, &timestamp, &receivedAt); err != nil {
+			return nil, err
+		}
+		sample.Temperature = float32Ptr(temperature)
+		sample.RelativeHumidity = float32Ptr(relativeHumidity)
+		sample.BarometricPressure = float32Ptr(barometricPressure)
+		sample.GasResistance = float32Ptr(gasResistance)
+		sample.Voltage = float32Ptr(voltage)
+		sample.Current = float32Ptr(current)
+		sample.IAQ = uint32Ptr(iaq)
+		sample.Distance = float32Ptr(distance)
+		sample.Lux = float32Ptr(lux)
+		sample.WhiteLux = float32Ptr(whiteLux)
+		sample.IRLux = float32Ptr(irLux)
+		sample.UVLux = float32Ptr(uvLux)
+		sample.WindDirection = uint32Ptr(windDirection)
+		sample.WindSpeed = float32Ptr(windSpeed)
+		sample.WindGust = float32Ptr(windGust)
+		sample.WindLull = float32Ptr(windLull)
+		sample.Weight = float32Ptr(weight)
+		sample.Timestamp = time.Unix(timestamp, 0)
+		sample.ReceivedAt = time.Unix(receivedAt, 0)
+		out = append(out, sample)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeviceTelemetryHistory(ctx context.Context, nodeNum uint32, limit int) ([]mesh.DeviceTelemetry, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	query := `SELECT node_num, node_id, node_long_name, node_short_name, battery_level, voltage, channel_utilization, air_util_tx, uptime_seconds, timestamp, received_at FROM device_telemetry_history`
+	args := make([]interface{}, 0, 2)
+	if nodeNum != 0 {
+		query += ` WHERE node_num = ?`
+		args = append(args, nodeNum)
+	}
+	query += ` ORDER BY received_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mesh.DeviceTelemetry
+	for rows.Next() {
+		var sample mesh.DeviceTelemetry
+		var battery, uptime sql.NullInt64
+		var voltage, channelUtil, airUtil sql.NullFloat64
+		var timestamp, receivedAt int64
+		if err := rows.Scan(&sample.Node.Num, &sample.Node.ID, &sample.Node.LongName, &sample.Node.ShortName, &battery, &voltage, &channelUtil, &airUtil, &uptime, &timestamp, &receivedAt); err != nil {
+			return nil, err
+		}
+		sample.BatteryLevel = uint32Ptr(battery)
+		sample.Voltage = float32Ptr(voltage)
+		sample.ChannelUtilization = float32Ptr(channelUtil)
+		sample.AirUtilTx = float32Ptr(airUtil)
+		sample.UptimeSeconds = uint32Ptr(uptime)
+		sample.Timestamp = time.Unix(timestamp, 0)
+		sample.ReceivedAt = time.Unix(receivedAt, 0)
+		out = append(out, sample)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) LocalStatsTelemetryHistory(ctx context.Context, nodeNum uint32, limit int) ([]mesh.LocalStatsTelemetry, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	query := `SELECT node_num, node_id, node_long_name, node_short_name, uptime_seconds, channel_utilization, air_util_tx, num_packets_tx, num_packets_rx, num_packets_rx_bad, num_online_nodes, num_total_nodes, num_rx_dupe, num_tx_relay, num_tx_relay_canceled, timestamp, received_at FROM local_stats_telemetry_history`
+	args := make([]interface{}, 0, 2)
+	if nodeNum != 0 {
+		query += ` WHERE node_num = ?`
+		args = append(args, nodeNum)
+	}
+	query += ` ORDER BY received_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mesh.LocalStatsTelemetry
+	for rows.Next() {
+		var sample mesh.LocalStatsTelemetry
+		var timestamp, receivedAt int64
+		if err := rows.Scan(&sample.Node.Num, &sample.Node.ID, &sample.Node.LongName, &sample.Node.ShortName, &sample.UptimeSeconds, &sample.ChannelUtilization, &sample.AirUtilTx, &sample.NumPacketsTx, &sample.NumPacketsRx, &sample.NumPacketsRxBad, &sample.NumOnlineNodes, &sample.NumTotalNodes, &sample.NumRxDupe, &sample.NumTxRelay, &sample.NumTxRelayCanceled, &timestamp, &receivedAt); err != nil {
+			return nil, err
+		}
+		sample.Timestamp = time.Unix(timestamp, 0)
+		sample.ReceivedAt = time.Unix(receivedAt, 0)
+		out = append(out, sample)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) Channels(ctx context.Context) ([]mesh.Channel, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT idx, name, role, channel_id, psk_bytes, uplink_enabled, downlink_enabled
@@ -988,6 +1275,44 @@ ORDER BY idx ASC`)
 	}
 
 	return channels, rows.Err()
+}
+
+func (s *Store) TraceRoutes(ctx context.Context, nodeNum uint32, limit int) ([]mesh.TraceRoute, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	query := `SELECT payload_json, received_at FROM trace_routes`
+	args := []interface{}{}
+	if nodeNum != 0 {
+		query += ` WHERE from_num = ? OR to_num = ?`
+		args = append(args, nodeNum, nodeNum)
+	}
+	query += ` ORDER BY received_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]mesh.TraceRoute, 0, limit)
+	for rows.Next() {
+		var payload string
+		var receivedAt int64
+		if err := rows.Scan(&payload, &receivedAt); err != nil {
+			return nil, err
+		}
+		var route mesh.TraceRoute
+		if err := json.Unmarshal([]byte(payload), &route); err != nil {
+			continue
+		}
+		if route.ReceivedAt.IsZero() {
+			route.ReceivedAt = time.Unix(receivedAt, 0)
+		}
+		out = append(out, route)
+	}
+	return out, rows.Err()
 }
 
 func boolInt(value bool) int {

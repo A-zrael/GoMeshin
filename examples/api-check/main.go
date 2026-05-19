@@ -256,7 +256,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 	case rxMsg:
-		m.history = append(m.history, mesh.Message(msg))
+		incoming := mesh.Message(msg)
+		duplicate := false
+		for i := len(m.history) - 1; i >= 0 && i >= len(m.history)-40; i-- {
+			existing := m.history[i]
+			if existing.ID == incoming.ID &&
+				existing.Text == incoming.Text &&
+				existing.From.Num == incoming.From.Num &&
+				existing.Channel.Name == incoming.Channel.Name {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			m.history = append(m.history, incoming)
+		}
 		if len(m.history) > 300 {
 			m.history = m.history[len(m.history)-300:]
 		}
@@ -265,6 +279,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "radio stream closed"
 	case sentMsg:
 		m.status = fmt.Sprintf("sent %08x", msg.id)
+		channel := m.currentChannel()
+		sent := mesh.Message{
+			ID: msg.id,
+			Channel: mesh.ChannelRef{
+				Index: channel.Index,
+				Name:  channel.Name,
+			},
+			Text:       msg.text,
+			ReceivedAt: time.Now(),
+		}
+		m.history = append(m.history, sent)
+		if len(m.history) > 300 {
+			m.history = m.history[len(m.history)-300:]
+		}
 	case sendErrMsg:
 		m.status = "send failed: " + msg.err.Error()
 	case channelOpMsg:

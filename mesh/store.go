@@ -16,6 +16,7 @@ type Store interface {
 	SaveAirQualityTelemetry(context.Context, AirQualityTelemetry) error
 	SaveLocalStatsTelemetry(context.Context, LocalStatsTelemetry) error
 	SaveHealthTelemetry(context.Context, HealthTelemetry) error
+	SaveTraceRoute(context.Context, TraceRoute) error
 	SaveChannel(context.Context, Channel) error
 	Messages(context.Context) ([]Message, error)
 	Nodes(context.Context) ([]Node, error)
@@ -26,21 +27,29 @@ type Store interface {
 	AirQualityTelemetries(context.Context) ([]AirQualityTelemetry, error)
 	LocalStatsTelemetries(context.Context) ([]LocalStatsTelemetry, error)
 	HealthTelemetries(context.Context) ([]HealthTelemetry, error)
+	EnvironmentTelemetryHistory(context.Context, uint32, int) ([]EnvironmentTelemetry, error)
+	DeviceTelemetryHistory(context.Context, uint32, int) ([]DeviceTelemetry, error)
+	LocalStatsTelemetryHistory(context.Context, uint32, int) ([]LocalStatsTelemetry, error)
+	TraceRoutes(context.Context, uint32, int) ([]TraceRoute, error)
 	Channels(context.Context) ([]Channel, error)
 }
 
 type MemoryStore struct {
-	mu           sync.RWMutex
-	messages     []Message
-	nodes        map[uint32]Node
-	positions    map[uint32]Position
-	environments map[uint32]EnvironmentTelemetry
-	devices      map[uint32]DeviceTelemetry
-	powers       map[uint32]PowerTelemetry
-	airs         map[uint32]AirQualityTelemetry
-	locals       map[uint32]LocalStatsTelemetry
-	healths      map[uint32]HealthTelemetry
-	channels     map[int32]Channel
+	mu                 sync.RWMutex
+	messages           []Message
+	nodes              map[uint32]Node
+	positions          map[uint32]Position
+	environments       map[uint32]EnvironmentTelemetry
+	devices            map[uint32]DeviceTelemetry
+	powers             map[uint32]PowerTelemetry
+	airs               map[uint32]AirQualityTelemetry
+	locals             map[uint32]LocalStatsTelemetry
+	healths            map[uint32]HealthTelemetry
+	environmentHistory []EnvironmentTelemetry
+	deviceHistory      []DeviceTelemetry
+	localStatsHistory  []LocalStatsTelemetry
+	traceHistory       []TraceRoute
+	channels           map[int32]Channel
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -107,6 +116,7 @@ func (s *MemoryStore) SaveEnvironmentTelemetry(_ context.Context, environment En
 		environment.ReceivedAt = time.Now()
 	}
 	s.environments[environment.Node.Num] = environment
+	s.environmentHistory = append(s.environmentHistory, environment)
 	return nil
 }
 
@@ -117,6 +127,7 @@ func (s *MemoryStore) SaveDeviceTelemetry(_ context.Context, sample DeviceTeleme
 		sample.ReceivedAt = time.Now()
 	}
 	s.devices[sample.Node.Num] = sample
+	s.deviceHistory = append(s.deviceHistory, sample)
 	return nil
 }
 
@@ -147,6 +158,7 @@ func (s *MemoryStore) SaveLocalStatsTelemetry(_ context.Context, sample LocalSta
 		sample.ReceivedAt = time.Now()
 	}
 	s.locals[sample.Node.Num] = sample
+	s.localStatsHistory = append(s.localStatsHistory, sample)
 	return nil
 }
 
@@ -157,6 +169,16 @@ func (s *MemoryStore) SaveHealthTelemetry(_ context.Context, sample HealthTeleme
 		sample.ReceivedAt = time.Now()
 	}
 	s.healths[sample.Node.Num] = sample
+	return nil
+}
+
+func (s *MemoryStore) SaveTraceRoute(_ context.Context, route TraceRoute) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if route.ReceivedAt.IsZero() {
+		route.ReceivedAt = time.Now()
+	}
+	s.traceHistory = append(s.traceHistory, route)
 	return nil
 }
 
@@ -258,6 +280,90 @@ func (s *MemoryStore) HealthTelemetries(_ context.Context) ([]HealthTelemetry, e
 		out = append(out, sample)
 	}
 	return out, nil
+}
+
+func (s *MemoryStore) EnvironmentTelemetryHistory(_ context.Context, nodeNum uint32, limit int) ([]EnvironmentTelemetry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return filterEnvironmentHistory(s.environmentHistory, nodeNum, limit), nil
+}
+
+func (s *MemoryStore) DeviceTelemetryHistory(_ context.Context, nodeNum uint32, limit int) ([]DeviceTelemetry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return filterDeviceHistory(s.deviceHistory, nodeNum, limit), nil
+}
+
+func (s *MemoryStore) LocalStatsTelemetryHistory(_ context.Context, nodeNum uint32, limit int) ([]LocalStatsTelemetry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return filterLocalStatsHistory(s.localStatsHistory, nodeNum, limit), nil
+}
+
+func (s *MemoryStore) TraceRoutes(_ context.Context, nodeNum uint32, limit int) ([]TraceRoute, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return filterTraceHistory(s.traceHistory, nodeNum, limit), nil
+}
+
+func filterEnvironmentHistory(samples []EnvironmentTelemetry, nodeNum uint32, limit int) []EnvironmentTelemetry {
+	if limit <= 0 {
+		limit = 200
+	}
+	out := make([]EnvironmentTelemetry, 0, limit)
+	for i := len(samples) - 1; i >= 0 && len(out) < limit; i-- {
+		sample := samples[i]
+		if nodeNum != 0 && sample.Node.Num != nodeNum {
+			continue
+		}
+		out = append(out, sample)
+	}
+	return out
+}
+
+func filterDeviceHistory(samples []DeviceTelemetry, nodeNum uint32, limit int) []DeviceTelemetry {
+	if limit <= 0 {
+		limit = 200
+	}
+	out := make([]DeviceTelemetry, 0, limit)
+	for i := len(samples) - 1; i >= 0 && len(out) < limit; i-- {
+		sample := samples[i]
+		if nodeNum != 0 && sample.Node.Num != nodeNum {
+			continue
+		}
+		out = append(out, sample)
+	}
+	return out
+}
+
+func filterLocalStatsHistory(samples []LocalStatsTelemetry, nodeNum uint32, limit int) []LocalStatsTelemetry {
+	if limit <= 0 {
+		limit = 200
+	}
+	out := make([]LocalStatsTelemetry, 0, limit)
+	for i := len(samples) - 1; i >= 0 && len(out) < limit; i-- {
+		sample := samples[i]
+		if nodeNum != 0 && sample.Node.Num != nodeNum {
+			continue
+		}
+		out = append(out, sample)
+	}
+	return out
+}
+
+func filterTraceHistory(samples []TraceRoute, nodeNum uint32, limit int) []TraceRoute {
+	if limit <= 0 {
+		limit = 200
+	}
+	out := make([]TraceRoute, 0, limit)
+	for i := len(samples) - 1; i >= 0 && len(out) < limit; i-- {
+		sample := samples[i]
+		if nodeNum != 0 && sample.From != nodeNum && sample.To != nodeNum {
+			continue
+		}
+		out = append(out, sample)
+	}
+	return out
 }
 
 func (s *MemoryStore) Channels(_ context.Context) ([]Channel, error) {

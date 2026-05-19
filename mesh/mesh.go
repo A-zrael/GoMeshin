@@ -43,9 +43,17 @@ type Mesh struct {
 	subscribers            map[chan Message]struct{}
 	positionSubscribers    map[chan Position]struct{}
 	environmentSubscribers map[chan EnvironmentTelemetry]struct{}
+	deviceSubscribers      map[chan DeviceTelemetry]struct{}
+	powerSubscribers       map[chan PowerTelemetry]struct{}
+	airSubscribers         map[chan AirQualityTelemetry]struct{}
+	localSubscribers       map[chan LocalStatsTelemetry]struct{}
+	healthSubscribers      map[chan HealthTelemetry]struct{}
+	traceSubscribers       map[chan TraceRoute]struct{}
 
-	traceMu sync.Mutex
-	traces  map[uint32]chan TraceRoute
+	traceMu       sync.Mutex
+	traces        map[uint32]chan TraceRoute
+	traceResolved map[uint32]TraceRoute
+	tracePending  map[uint32]PendingTrace
 }
 
 type Message struct {
@@ -60,11 +68,12 @@ type Message struct {
 }
 
 type TraceRoute struct {
-	RequestID uint32
-	From      uint32
-	To        uint32
-	Towards   []TraceHop
-	Back      []TraceHop
+	RequestID  uint32
+	From       uint32
+	To         uint32
+	Towards    []TraceHop
+	Back       []TraceHop
+	ReceivedAt time.Time
 }
 
 type TraceHop struct {
@@ -226,6 +235,15 @@ type TraceRouteOptions struct {
 	HopLimit uint32
 }
 
+type PendingTrace struct {
+	RequestID uint32
+	To        uint32
+	Channel   string
+	HopLimit  uint32
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
 func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 	if cfg.Store == nil {
 		cfg.Store = NewMemoryStore()
@@ -258,7 +276,15 @@ func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 		subscribers:            make(map[chan Message]struct{}),
 		positionSubscribers:    make(map[chan Position]struct{}),
 		environmentSubscribers: make(map[chan EnvironmentTelemetry]struct{}),
+		deviceSubscribers:      make(map[chan DeviceTelemetry]struct{}),
+		powerSubscribers:       make(map[chan PowerTelemetry]struct{}),
+		airSubscribers:         make(map[chan AirQualityTelemetry]struct{}),
+		localSubscribers:       make(map[chan LocalStatsTelemetry]struct{}),
+		healthSubscribers:      make(map[chan HealthTelemetry]struct{}),
+		traceSubscribers:       make(map[chan TraceRoute]struct{}),
 		traces:                 make(map[uint32]chan TraceRoute),
+		traceResolved:          make(map[uint32]TraceRoute),
+		tracePending:           make(map[uint32]PendingTrace),
 	}
 
 	for _, channel := range radio.Channels() {
@@ -317,11 +343,40 @@ func (m *Mesh) Send(text string, opts SendOptions) (uint32, error) {
 		return 0, err
 	}
 
-	return m.radio.SendText(text, meshtasticapi.SendOptions{
+	id, err := m.radio.SendText(text, meshtasticapi.SendOptions{
 		To:      opts.To,
 		Channel: uint32(channelIndex),
 		WantAck: opts.WantAck,
 	})
+	if err != nil {
+		return 0, err
+	}
+
+	m.mu.RLock()
+	myNode := m.nodes[m.myNode]
+	channel := m.channels[channelIndex]
+	m.mu.RUnlock()
+
+	message := Message{
+		ID: id,
+		From: NodeRef{
+			Num:       m.myNode,
+			ID:        myNode.ID,
+			LongName:  myNode.LongName,
+			ShortName: myNode.ShortName,
+		},
+		To: opts.To,
+		Channel: ChannelRef{
+			Index: channelIndex,
+			Name:  channel.Name,
+		},
+		Text:       text,
+		ReceivedAt: time.Now(),
+	}
+	_ = m.store.SaveMessage(m.ctx, message)
+	m.publish(message)
+
+	return id, nil
 }
 
 func (m *Mesh) AddChannel(ctx context.Context, opts ChannelOptions) error {
@@ -469,8 +524,23 @@ func (m *Mesh) TraceRoute(ctx context.Context, opts TraceRouteOptions) (TraceRou
 		}
 
 		reply := make(chan TraceRoute, 1)
+		deadline, _ := ctx.Deadline()
+		createdAt := time.Now()
 		m.traceMu.Lock()
+		if cached, ok := m.traceResolved[result.id]; ok {
+			delete(m.traceResolved, result.id)
+			m.traceMu.Unlock()
+			return cached, nil
+		}
 		m.traces[result.id] = reply
+		m.tracePending[result.id] = PendingTrace{
+			RequestID: result.id,
+			To:        opts.To,
+			Channel:   opts.Channel,
+			HopLimit:  opts.HopLimit,
+			CreatedAt: createdAt,
+			ExpiresAt: deadline,
+		}
 		m.traceMu.Unlock()
 		defer m.forgetTrace(result.id)
 
@@ -549,6 +619,120 @@ func (m *Mesh) SubscribeEnvironment(buffer int) (<-chan EnvironmentTelemetry, fu
 	return ch, cancel
 }
 
+func (m *Mesh) SubscribeDevice(buffer int) (<-chan DeviceTelemetry, func()) {
+	if buffer < 0 {
+		buffer = 0
+	}
+	ch := make(chan DeviceTelemetry, buffer)
+	m.subsMu.Lock()
+	m.deviceSubscribers[ch] = struct{}{}
+	m.subsMu.Unlock()
+	cancel := func() {
+		m.subsMu.Lock()
+		if _, ok := m.deviceSubscribers[ch]; ok {
+			delete(m.deviceSubscribers, ch)
+			close(ch)
+		}
+		m.subsMu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (m *Mesh) SubscribePower(buffer int) (<-chan PowerTelemetry, func()) {
+	if buffer < 0 {
+		buffer = 0
+	}
+	ch := make(chan PowerTelemetry, buffer)
+	m.subsMu.Lock()
+	m.powerSubscribers[ch] = struct{}{}
+	m.subsMu.Unlock()
+	cancel := func() {
+		m.subsMu.Lock()
+		if _, ok := m.powerSubscribers[ch]; ok {
+			delete(m.powerSubscribers, ch)
+			close(ch)
+		}
+		m.subsMu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (m *Mesh) SubscribeAir(buffer int) (<-chan AirQualityTelemetry, func()) {
+	if buffer < 0 {
+		buffer = 0
+	}
+	ch := make(chan AirQualityTelemetry, buffer)
+	m.subsMu.Lock()
+	m.airSubscribers[ch] = struct{}{}
+	m.subsMu.Unlock()
+	cancel := func() {
+		m.subsMu.Lock()
+		if _, ok := m.airSubscribers[ch]; ok {
+			delete(m.airSubscribers, ch)
+			close(ch)
+		}
+		m.subsMu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (m *Mesh) SubscribeLocalStats(buffer int) (<-chan LocalStatsTelemetry, func()) {
+	if buffer < 0 {
+		buffer = 0
+	}
+	ch := make(chan LocalStatsTelemetry, buffer)
+	m.subsMu.Lock()
+	m.localSubscribers[ch] = struct{}{}
+	m.subsMu.Unlock()
+	cancel := func() {
+		m.subsMu.Lock()
+		if _, ok := m.localSubscribers[ch]; ok {
+			delete(m.localSubscribers, ch)
+			close(ch)
+		}
+		m.subsMu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (m *Mesh) SubscribeHealth(buffer int) (<-chan HealthTelemetry, func()) {
+	if buffer < 0 {
+		buffer = 0
+	}
+	ch := make(chan HealthTelemetry, buffer)
+	m.subsMu.Lock()
+	m.healthSubscribers[ch] = struct{}{}
+	m.subsMu.Unlock()
+	cancel := func() {
+		m.subsMu.Lock()
+		if _, ok := m.healthSubscribers[ch]; ok {
+			delete(m.healthSubscribers, ch)
+			close(ch)
+		}
+		m.subsMu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (m *Mesh) SubscribeTraces(buffer int) (<-chan TraceRoute, func()) {
+	if buffer < 0 {
+		buffer = 0
+	}
+	ch := make(chan TraceRoute, buffer)
+	m.subsMu.Lock()
+	m.traceSubscribers[ch] = struct{}{}
+	m.subsMu.Unlock()
+	cancel := func() {
+		m.subsMu.Lock()
+		if _, ok := m.traceSubscribers[ch]; ok {
+			delete(m.traceSubscribers, ch)
+			close(ch)
+		}
+		m.subsMu.Unlock()
+	}
+	return ch, cancel
+}
+
 func (m *Mesh) Messages(ctx context.Context) ([]Message, error) {
 	return m.store.Messages(ctx)
 }
@@ -583,6 +767,22 @@ func (m *Mesh) LocalStatsTelemetries(ctx context.Context) ([]LocalStatsTelemetry
 
 func (m *Mesh) HealthTelemetries(ctx context.Context) ([]HealthTelemetry, error) {
 	return m.store.HealthTelemetries(ctx)
+}
+
+func (m *Mesh) EnvironmentTelemetryHistory(ctx context.Context, nodeNum uint32, limit int) ([]EnvironmentTelemetry, error) {
+	return m.store.EnvironmentTelemetryHistory(ctx, nodeNum, limit)
+}
+
+func (m *Mesh) DeviceTelemetryHistory(ctx context.Context, nodeNum uint32, limit int) ([]DeviceTelemetry, error) {
+	return m.store.DeviceTelemetryHistory(ctx, nodeNum, limit)
+}
+
+func (m *Mesh) LocalStatsTelemetryHistory(ctx context.Context, nodeNum uint32, limit int) ([]LocalStatsTelemetry, error) {
+	return m.store.LocalStatsTelemetryHistory(ctx, nodeNum, limit)
+}
+
+func (m *Mesh) TraceRoutes(ctx context.Context, nodeNum uint32, limit int) ([]TraceRoute, error) {
+	return m.store.TraceRoutes(ctx, nodeNum, limit)
 }
 
 func (m *Mesh) Channels(ctx context.Context) ([]Channel, error) {
@@ -823,6 +1023,7 @@ func (m *Mesh) upsertDeviceTelemetry(sample DeviceTelemetry) {
 	m.devices[sample.Node.Num] = sample
 	m.mu.Unlock()
 	_ = m.store.SaveDeviceTelemetry(m.ctx, sample)
+	m.publishDevice(sample)
 }
 
 func (m *Mesh) upsertPowerTelemetry(sample PowerTelemetry) {
@@ -833,6 +1034,7 @@ func (m *Mesh) upsertPowerTelemetry(sample PowerTelemetry) {
 	m.powers[sample.Node.Num] = sample
 	m.mu.Unlock()
 	_ = m.store.SavePowerTelemetry(m.ctx, sample)
+	m.publishPower(sample)
 }
 
 func (m *Mesh) upsertAirQualityTelemetry(sample AirQualityTelemetry) {
@@ -843,6 +1045,7 @@ func (m *Mesh) upsertAirQualityTelemetry(sample AirQualityTelemetry) {
 	m.airs[sample.Node.Num] = sample
 	m.mu.Unlock()
 	_ = m.store.SaveAirQualityTelemetry(m.ctx, sample)
+	m.publishAir(sample)
 }
 
 func (m *Mesh) upsertLocalStatsTelemetry(sample LocalStatsTelemetry) {
@@ -853,6 +1056,7 @@ func (m *Mesh) upsertLocalStatsTelemetry(sample LocalStatsTelemetry) {
 	m.locals[sample.Node.Num] = sample
 	m.mu.Unlock()
 	_ = m.store.SaveLocalStatsTelemetry(m.ctx, sample)
+	m.publishLocal(sample)
 }
 
 func (m *Mesh) upsertHealthTelemetry(sample HealthTelemetry) {
@@ -863,6 +1067,7 @@ func (m *Mesh) upsertHealthTelemetry(sample HealthTelemetry) {
 	m.healths[sample.Node.Num] = sample
 	m.mu.Unlock()
 	_ = m.store.SaveHealthTelemetry(m.ctx, sample)
+	m.publishHealth(sample)
 }
 
 func (m *Mesh) upsertChannel(channel Channel) {
@@ -909,9 +1114,90 @@ func (m *Mesh) publishEnvironment(environment EnvironmentTelemetry) {
 	}
 }
 
+func (m *Mesh) publishDevice(sample DeviceTelemetry) {
+	m.subsMu.RLock()
+	defer m.subsMu.RUnlock()
+	for ch := range m.deviceSubscribers {
+		select {
+		case ch <- sample:
+		default:
+		}
+	}
+}
+
+func (m *Mesh) publishPower(sample PowerTelemetry) {
+	m.subsMu.RLock()
+	defer m.subsMu.RUnlock()
+	for ch := range m.powerSubscribers {
+		select {
+		case ch <- sample:
+		default:
+		}
+	}
+}
+
+func (m *Mesh) publishAir(sample AirQualityTelemetry) {
+	m.subsMu.RLock()
+	defer m.subsMu.RUnlock()
+	for ch := range m.airSubscribers {
+		select {
+		case ch <- sample:
+		default:
+		}
+	}
+}
+
+func (m *Mesh) publishLocal(sample LocalStatsTelemetry) {
+	m.subsMu.RLock()
+	defer m.subsMu.RUnlock()
+	for ch := range m.localSubscribers {
+		select {
+		case ch <- sample:
+		default:
+		}
+	}
+}
+
+func (m *Mesh) publishHealth(sample HealthTelemetry) {
+	m.subsMu.RLock()
+	defer m.subsMu.RUnlock()
+	for ch := range m.healthSubscribers {
+		select {
+		case ch <- sample:
+		default:
+		}
+	}
+}
+
+func (m *Mesh) publishTrace(route TraceRoute) {
+	m.subsMu.RLock()
+	defer m.subsMu.RUnlock()
+	for ch := range m.traceSubscribers {
+		select {
+		case ch <- route:
+		default:
+		}
+	}
+}
+
 func (m *Mesh) resolveTrace(route TraceRoute) {
+	if route.ReceivedAt.IsZero() {
+		route.ReceivedAt = time.Now()
+	}
+	_ = m.store.SaveTraceRoute(m.ctx, route)
+	m.publishTrace(route)
+
 	m.traceMu.Lock()
 	reply := m.traces[route.RequestID]
+	if reply == nil {
+		m.traceResolved[route.RequestID] = route
+		if len(m.traceResolved) > 512 {
+			for key := range m.traceResolved {
+				delete(m.traceResolved, key)
+				break
+			}
+		}
+	}
 	m.traceMu.Unlock()
 
 	if reply == nil {
@@ -927,7 +1213,18 @@ func (m *Mesh) resolveTrace(route TraceRoute) {
 func (m *Mesh) forgetTrace(id uint32) {
 	m.traceMu.Lock()
 	delete(m.traces, id)
+	delete(m.tracePending, id)
 	m.traceMu.Unlock()
+}
+
+func (m *Mesh) PendingTraces() []PendingTrace {
+	m.traceMu.Lock()
+	defer m.traceMu.Unlock()
+	out := make([]PendingTrace, 0, len(m.tracePending))
+	for _, pending := range m.tracePending {
+		out = append(out, pending)
+	}
+	return out
 }
 
 func (m *Mesh) closeSubscribers() {
@@ -945,6 +1242,30 @@ func (m *Mesh) closeSubscribers() {
 	for ch := range m.environmentSubscribers {
 		close(ch)
 		delete(m.environmentSubscribers, ch)
+	}
+	for ch := range m.deviceSubscribers {
+		close(ch)
+		delete(m.deviceSubscribers, ch)
+	}
+	for ch := range m.powerSubscribers {
+		close(ch)
+		delete(m.powerSubscribers, ch)
+	}
+	for ch := range m.airSubscribers {
+		close(ch)
+		delete(m.airSubscribers, ch)
+	}
+	for ch := range m.localSubscribers {
+		close(ch)
+		delete(m.localSubscribers, ch)
+	}
+	for ch := range m.healthSubscribers {
+		close(ch)
+		delete(m.healthSubscribers, ch)
+	}
+	for ch := range m.traceSubscribers {
+		close(ch)
+		delete(m.traceSubscribers, ch)
 	}
 }
 
