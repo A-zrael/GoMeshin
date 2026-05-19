@@ -28,8 +28,10 @@
     <nav class="tabs" aria-label="Views">
       <button class="tab active" type="button" data-tab="chat">Chat</button>
       <button class="tab" type="button" data-tab="map">Map</button>
+      <button class="tab" type="button" data-tab="topology">Topology</button>
       <button class="tab" type="button" data-tab="weather">Weather</button>
       <button class="tab" type="button" data-tab="telemetry">Telemetry</button>
+      <button class="tab" type="button" data-tab="settings">Settings</button>
       <button class="tab" type="button" data-tab="nodes">Nodes</button>
       <button class="tab" type="button" data-tab="tools">Debug</button>
     </nav>
@@ -90,14 +92,6 @@
                   <option value="off">Hide</option>
                 </select>
               </label>
-              <label>
-                Hop
-                <input id="trace-hop-limit" type="number" min="1" max="7" step="1" value="3" />
-              </label>
-              <label>
-                Timeout
-                <input id="trace-timeout-seconds" type="number" min="10" max="180" step="5" value="90" />
-              </label>
               <button id="check-pending-traces" type="button">Pending</button>
               <label>
                 Find node
@@ -112,6 +106,21 @@
             </div>
           </div>
           <div id="map" class="map"></div>
+        </section>
+      </section>
+
+      <section class="view" data-view="topology">
+        <section class="pane topology-pane">
+          <div class="pane-header">
+            <div>
+              <h2>Topology</h2>
+              <span id="topology-summary">0 nodes • 0 links</span>
+            </div>
+            <button id="refresh-topology" type="button">Refresh</button>
+          </div>
+          <div id="topology-graph" class="topology-graph">
+            <div id="topology-details" class="topology-details">Click a node or link for details.</div>
+          </div>
         </section>
       </section>
 
@@ -138,6 +147,62 @@
             <button id="refresh-telemetry" type="button">Refresh</button>
           </div>
           <div id="telemetry" class="telemetry-grid"></div>
+        </section>
+      </section>
+
+      <section class="view" data-view="settings">
+        <section class="pane settings-pane">
+          <div class="pane-header">
+            <div>
+              <h2>Radio Settings</h2>
+              <span id="settings-summary">Not loaded</span>
+            </div>
+            <button id="refresh-settings" type="button">Refresh</button>
+          </div>
+          <form id="settings-form" class="settings-form">
+            <label>
+              Hop Limit
+              <input id="settings-hop-limit" type="number" min="1" max="7" step="1" />
+            </label>
+            <label>
+              Role
+              <select id="settings-role">
+                <option value="CLIENT">CLIENT</option>
+                <option value="CLIENT_MUTE">CLIENT_MUTE</option>
+                <option value="ROUTER">ROUTER</option>
+                <option value="REPEATER">REPEATER</option>
+                <option value="TRACKER">TRACKER</option>
+                <option value="SENSOR">SENSOR</option>
+                <option value="TAK">TAK</option>
+                <option value="CLIENT_HIDDEN">CLIENT_HIDDEN</option>
+                <option value="LOST_AND_FOUND">LOST_AND_FOUND</option>
+                <option value="TAK_TRACKER">TAK_TRACKER</option>
+              </select>
+            </label>
+            <label class="settings-checkbox">
+              <input id="settings-tx-enabled" type="checkbox" />
+              <span>TX Enabled</span>
+            </label>
+            <button id="save-settings" type="submit">Apply</button>
+          </form>
+          <form id="location-form" class="settings-form">
+            <label>
+              Fixed Latitude
+              <input id="settings-latitude" type="number" step="0.0000001" min="-90" max="90" placeholder="51.5074000" />
+            </label>
+            <label>
+              Fixed Longitude
+              <input id="settings-longitude" type="number" step="0.0000001" min="-180" max="180" placeholder="-0.1278000" />
+            </label>
+            <label>
+              Altitude (m)
+              <input id="settings-altitude" type="number" step="1" placeholder="35" />
+            </label>
+            <div class="settings-actions">
+              <button id="set-location" type="submit">Set Fixed Location</button>
+              <button id="clear-location" type="button">Clear Fixed Location</button>
+            </div>
+          </form>
         </section>
       </section>
 

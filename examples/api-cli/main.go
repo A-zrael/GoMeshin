@@ -212,6 +212,16 @@ func mustTraceRoute(ctx context.Context, api *client, to string, channel string,
 	}
 
 	fmt.Printf("traceroute id=%08x from=!%08x to=!%08x\n", route.RequestID, route.From, route.To)
+	if route.RxRSSI != nil || route.RxSNR != nil {
+		fmt.Print("rx:")
+		if route.RxRSSI != nil {
+			fmt.Printf(" rssi=%ddBm", *route.RxRSSI)
+		}
+		if route.RxSNR != nil {
+			fmt.Printf(" snr=%.1fdB", *route.RxSNR)
+		}
+		fmt.Println()
+	}
 	fmt.Println("towards:", formatTraceHops(route.Towards))
 	if len(route.Back) > 0 {
 		fmt.Println("back:   ", formatTraceHops(route.Back))

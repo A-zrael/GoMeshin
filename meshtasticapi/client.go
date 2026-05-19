@@ -95,6 +95,8 @@ const (
 
 type Packet struct {
 	ID          uint32
+	RequestID   uint32
+	ReplyID     uint32
 	From        uint32
 	To          uint32
 	Channel     uint32
@@ -242,6 +244,8 @@ type TraceRoute struct {
 	SNRTowards []int32
 	RouteBack  []uint32
 	SNRBack    []int32
+	RxRSSI     *int32
+	RxSNR      *float32
 }
 
 type Channel struct {
@@ -1089,6 +1093,8 @@ func decodeMeshPacket(packet *meshtastic.MeshPacket) Event {
 	}
 
 	event.Packet.Port = decoded.GetPortnum()
+	event.Packet.RequestID = decoded.GetRequestId()
+	event.Packet.ReplyID = decoded.GetReplyId()
 	event.Packet.Payload = decoded.GetPayload()
 
 	switch decoded.GetPortnum() {
@@ -1140,14 +1146,18 @@ func decodeMeshPacket(packet *meshtastic.MeshPacket) Event {
 		var route meshtastic.RouteDiscovery
 		if err := proto.Unmarshal(decoded.GetPayload(), &route); err == nil {
 			event.Type = EventTraceRoute
-			event.TraceRoute = &TraceRoute{
-				RequestID:  decoded.GetRequestId(),
-				From:       packet.GetFrom(),
-				To:         packet.GetTo(),
-				Route:      append([]uint32(nil), route.GetRoute()...),
-				SNRTowards: append([]int32(nil), route.GetSnrTowards()...),
-				RouteBack:  append([]uint32(nil), route.GetRouteBack()...),
-				SNRBack:    append([]int32(nil), route.GetSnrBack()...),
+			event.TraceRoute = decodeTraceRoute(decoded, packet, &route)
+		}
+	case meshtastic.PortNum_ROUTING_APP:
+		var routing meshtastic.Routing
+		if err := proto.Unmarshal(decoded.GetPayload(), &routing); err == nil {
+			route := routing.GetRouteReply()
+			if route == nil {
+				route = routing.GetRouteRequest()
+			}
+			if route != nil {
+				event.Type = EventTraceRoute
+				event.TraceRoute = decodeTraceRoute(decoded, packet, route)
 			}
 		}
 	default:
@@ -1155,4 +1165,38 @@ func decodeMeshPacket(packet *meshtastic.MeshPacket) Event {
 	}
 
 	return event
+}
+
+func decodeTraceRoute(decoded *meshtastic.Data, packet *meshtastic.MeshPacket, route *meshtastic.RouteDiscovery) *TraceRoute {
+	if route == nil {
+		return nil
+	}
+	requestID := decoded.GetReplyId()
+	if requestID == 0 {
+		requestID = decoded.GetRequestId()
+	}
+	if requestID == 0 {
+		requestID = packet.GetId()
+	}
+	return &TraceRoute{
+		RequestID:  requestID,
+		From:       packet.GetFrom(),
+		To:         packet.GetTo(),
+		Route:      append([]uint32(nil), route.GetRoute()...),
+		SNRTowards: append([]int32(nil), route.GetSnrTowards()...),
+		RouteBack:  append([]uint32(nil), route.GetRouteBack()...),
+		SNRBack:    append([]int32(nil), route.GetSnrBack()...),
+		RxRSSI:     int32ValuePtr(packet.GetRxRssi()),
+		RxSNR:      float32ValuePtr(packet.GetRxSnr()),
+	}
+}
+
+func int32ValuePtr(value int32) *int32 {
+	copied := value
+	return &copied
+}
+
+func float32ValuePtr(value float32) *float32 {
+	copied := value
+	return &copied
 }

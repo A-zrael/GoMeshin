@@ -32,12 +32,20 @@ const state = {
   mapSeenMinutes: 0,
   debugLog: [],
   traceToastSeen: new Map(),
-  traceHopLimit: 3,
-  traceTimeoutSeconds: 90,
   mapFitDone: false,
   reconnectTimer: null,
   tracing: false,
   traceCooldownUntil: 0,
+  topology: {
+    panX: 0,
+    panY: 0,
+    zoom: 1,
+    selectedNode: "",
+    selectedLink: "",
+    dragging: false,
+    dragX: 0,
+    dragY: 0,
+  },
 };
 const TRACE_STORAGE_KEY = "gomeshin.traceRoutes.v1";
 const TRACE_STORAGE_LIMIT = 12;
@@ -67,12 +75,25 @@ const els = {
   telemetry: document.querySelector("#telemetry"),
   telemetrySummary: document.querySelector("#telemetry-summary"),
   refreshTelemetry: document.querySelector("#refresh-telemetry"),
+  settingsSummary: document.querySelector("#settings-summary"),
+  refreshSettings: document.querySelector("#refresh-settings"),
+  settingsForm: document.querySelector("#settings-form"),
+  settingsHopLimit: document.querySelector("#settings-hop-limit"),
+  settingsRole: document.querySelector("#settings-role"),
+  settingsTxEnabled: document.querySelector("#settings-tx-enabled"),
+  locationForm: document.querySelector("#location-form"),
+  settingsLatitude: document.querySelector("#settings-latitude"),
+  settingsLongitude: document.querySelector("#settings-longitude"),
+  settingsAltitude: document.querySelector("#settings-altitude"),
+  clearLocation: document.querySelector("#clear-location"),
+  topologyGraph: document.querySelector("#topology-graph"),
+  topologySummary: document.querySelector("#topology-summary"),
+  topologyDetails: document.querySelector("#topology-details"),
+  refreshTopology: document.querySelector("#refresh-topology"),
   nodes: document.querySelector("#nodes"),
   nodeSearch: document.querySelector("#node-search"),
   debugLog: document.querySelector("#debug-log"),
   clearDebugLog: document.querySelector("#clear-debug-log"),
-  traceHopLimit: document.querySelector("#trace-hop-limit"),
-  traceTimeoutSeconds: document.querySelector("#trace-timeout-seconds"),
   checkPendingTraces: document.querySelector("#check-pending-traces"),
   refreshChannels: document.querySelector("#refresh-channels"),
   refreshNodes: document.querySelector("#refresh-nodes"),
@@ -120,23 +141,24 @@ els.refreshChannels.addEventListener("click", loadChannels);
 els.refreshNodes.addEventListener("click", loadNodes);
 els.refreshWeather.addEventListener("click", loadWeather);
 els.refreshTelemetry.addEventListener("click", loadTelemetry);
+els.refreshTopology.addEventListener("click", renderTopology);
+els.refreshSettings.addEventListener("click", loadSettings);
+els.settingsForm.addEventListener("submit", saveSettings);
+els.locationForm.addEventListener("submit", saveLocation);
+els.clearLocation.addEventListener("click", clearLocation);
 els.nodeSearch.addEventListener("input", renderNodes);
 els.clearDebugLog.addEventListener("click", () => clearDebugLog());
-els.traceHopLimit.addEventListener("input", () => {
-  const value = Number.parseInt(els.traceHopLimit.value, 10);
-  state.traceHopLimit = Number.isFinite(value) && value > 0 ? value : 3;
-});
-els.traceTimeoutSeconds.addEventListener("input", () => {
-  const value = Number.parseInt(els.traceTimeoutSeconds.value, 10);
-  state.traceTimeoutSeconds = Number.isFinite(value) && value > 0 ? value : 90;
-});
 els.checkPendingTraces.addEventListener("click", async () => {
   try {
-    const pending = await requestSafeArray("/traceroutes/pending");
+    const payload = await request("/traceroutes/pending");
+    const pending = Array.isArray(payload) ? payload : [];
     if (!pending.length) {
       addDebugLog("Pending traces: none");
+      setStatus("Pending traces: none", "connected");
+      showToast("No pending traceroutes", "info");
       return;
     }
+    addDebugLog(`Pending traces: ${pending.length}`);
     for (const item of pending) {
       const id = item.requestID ?? item.RequestID ?? 0;
       const to = item.to ?? item.To ?? 0;
@@ -144,8 +166,12 @@ els.checkPendingTraces.addEventListener("click", async () => {
       const hop = item.hopLimit ?? item.HopLimit ?? 0;
       addDebugLog(`Pending trace id=${Number(id).toString(16).padStart(8, "0")} to=${formatNodeID(to)} channel=${ch || "Primary"} hop=${hop}`);
     }
+    setStatus(`Pending traces: ${pending.length}`, "connected");
+    showToast(`Pending traceroutes: ${pending.length}`, "ok");
   } catch (error) {
     addDebugLog(`Pending trace check failed: ${error.message}`);
+    setStatus(`Pending trace check failed: ${error.message}`, "error");
+    showToast("Pending traceroute check failed", "error");
   }
 });
 els.fitMap.addEventListener("click", () => fitMapToMarkers(true));
@@ -174,6 +200,12 @@ els.clearTraces.addEventListener("click", () => {
   state.traceRoutes = [];
   persistTraceRoutes();
   renderMap();
+  renderTopology();
+});
+window.addEventListener("resize", () => {
+  if (isTopologyTabActive()) {
+    renderTopology();
+  }
 });
 
 async function connect() {
@@ -182,11 +214,103 @@ async function connect() {
 
   try {
     await request("/health");
-    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather(), loadTelemetry(), loadTraceRoutes()]);
+    await Promise.all([loadChannels(), loadNodes(), loadMessages(), loadWeather(), loadTelemetry(), loadTraceRoutes(), loadSettings()]);
     openEvents();
     setStatus(`Connected to ${state.apiURL}`, "connected");
   } catch (error) {
     setStatus(error.message, "error");
+  }
+}
+
+async function loadSettings() {
+  try {
+    const settings = await request("/settings/radio");
+    els.settingsHopLimit.value = `${settings.hopLimit ?? settings.HopLimit ?? ""}`;
+    els.settingsRole.value = settings.role ?? settings.Role ?? "CLIENT";
+    els.settingsTxEnabled.checked = Boolean(settings.txEnabled ?? settings.TxEnabled);
+    const region = settings.region ?? settings.Region ?? "UNKNOWN";
+    const preset = settings.modemPreset ?? settings.ModemPreset ?? "UNKNOWN";
+    els.settingsSummary.textContent = `${region} • ${preset}`;
+  } catch (error) {
+    els.settingsSummary.textContent = `Load failed: ${error.message}`;
+    throw error
+  }
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const hop = Number.parseInt(els.settingsHopLimit.value, 10);
+  const role = String(els.settingsRole.value || "CLIENT");
+  const txEnabled = Boolean(els.settingsTxEnabled.checked);
+  if (!Number.isFinite(hop) || hop < 1 || hop > 7) {
+    setStatus("Hop limit must be between 1 and 7", "error");
+    return;
+  }
+  try {
+    const settings = await request("/settings/radio", {
+      method: "POST",
+      body: {
+        hopLimit: hop,
+        role,
+        txEnabled,
+      },
+    });
+    const region = settings.region ?? settings.Region ?? "UNKNOWN";
+    const preset = settings.modemPreset ?? settings.ModemPreset ?? "UNKNOWN";
+    els.settingsSummary.textContent = `${region} • ${preset}`;
+    setStatus("Radio settings updated", "connected");
+    showToast("Radio settings applied", "ok");
+  } catch (error) {
+    setStatus(`Settings apply failed: ${error.message}`, "error");
+    showToast("Radio settings apply failed", "error");
+  }
+}
+
+async function saveLocation(event) {
+  event.preventDefault();
+  const latitude = Number.parseFloat(els.settingsLatitude.value);
+  const longitude = Number.parseFloat(els.settingsLongitude.value);
+  const altitudeRaw = els.settingsAltitude.value.trim();
+  const altitude = altitudeRaw === "" ? null : Number.parseInt(altitudeRaw, 10);
+
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+    setStatus("Latitude must be between -90 and 90", "error");
+    return;
+  }
+  if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    setStatus("Longitude must be between -180 and 180", "error");
+    return;
+  }
+  if (altitudeRaw !== "" && !Number.isFinite(altitude)) {
+    setStatus("Altitude must be a whole number in meters", "error");
+    return;
+  }
+
+  try {
+    await request("/settings/location", {
+      method: "POST",
+      body: {
+        latitude,
+        longitude,
+        altitude: altitudeRaw === "" ? undefined : altitude,
+      },
+    });
+    setStatus("Fixed location applied", "connected");
+    showToast("Fixed location applied", "ok");
+  } catch (error) {
+    setStatus(`Set location failed: ${error.message}`, "error");
+    showToast("Set location failed", "error");
+  }
+}
+
+async function clearLocation() {
+  try {
+    await request("/settings/location", { method: "DELETE" });
+    setStatus("Fixed location cleared", "connected");
+    showToast("Fixed location cleared", "ok");
+  } catch (error) {
+    setStatus(`Clear location failed: ${error.message}`, "error");
+    showToast("Clear location failed", "error");
   }
 }
 
@@ -195,6 +319,7 @@ async function loadTraceRoutes() {
   state.traceRoutes = traces.filter((route) => route && typeof route === "object").slice(0, TRACE_STORAGE_LIMIT);
   persistTraceRoutes();
   renderMap();
+  renderTopology();
 }
 
 async function loadChannels() {
@@ -342,6 +467,7 @@ function openEvents() {
     rememberTrace(envelope.data);
     maybeToastTraceReceived(envelope.data);
     renderMap();
+    renderTopology();
   });
 
   events.onerror = () => {
@@ -687,25 +813,22 @@ async function runTraceroute(to) {
   }
   if (state.tracing) return;
   state.tracing = true;
-  state.traceCooldownUntil = now + 60000;
-  const hopLimit = Math.max(1, Math.min(7, Number(state.traceHopLimit) || 3));
-  const timeoutSeconds = Math.max(10, Math.min(180, Number(state.traceTimeoutSeconds) || 90));
-  addDebugLog(`Traceroute start -> ${to} channel=${state.selectedChannel || "Primary"} hop=${hopLimit} timeout=${timeoutSeconds}s`);
+  state.traceCooldownUntil = now + 30000;
+  const timeoutSeconds = 90;
+  addDebugLog(`Traceroute start -> ${to} channel=${state.selectedChannel || "Primary"}`);
   showToast(`Traceroute started: ${to}`, "info");
   try {
-    const route = await request("/traceroute", {
+    const response = await request("/traceroute", {
       method: "POST",
       body: {
         to,
         channel: state.selectedChannel,
-        hopLimit,
         timeoutSeconds,
       },
     });
-    addDebugLog(`Traceroute ok -> ${to} (${formatTrace(route).replace(/\n/g, " | ")})`);
-    maybeToastTraceReceived(route);
-    rememberTrace(route);
-    renderMap();
+    const pendingID = response.requestID ?? response.RequestID ?? 0;
+    addDebugLog(`Traceroute queued -> ${to} request=${Number(pendingID).toString(16).padStart(8, "0")}`);
+    showToast(`Traceroute queued: ${to}`, "ok");
   } catch (error) {
     addDebugLog(`Traceroute failed -> ${to} (${error.message})`);
     showToast(`Traceroute failed: ${error.message}`, "error");
@@ -780,15 +903,304 @@ function rememberTrace(route) {
   persistTraceRoutes();
 }
 
+function renderTopology() {
+  if (!els.topologyGraph) return;
+  const { nodes, links } = buildTopologyGraphData();
+  els.topologySummary.textContent = `${nodes.length} nodes • ${links.length} links`;
+  if (els.topologyDetails && !state.topology.selectedNode && !state.topology.selectedLink) {
+    els.topologyDetails.textContent = "Click a node or link for details.";
+  }
+
+  if (!nodes.length || !links.length) {
+    const empty = document.createElement("div");
+    empty.className = "topology-empty";
+    empty.textContent = "No traceroute links yet.";
+    const details = els.topologyDetails;
+    els.topologyGraph.replaceChildren(empty);
+    if (details) els.topologyGraph.append(details);
+    return;
+  }
+
+  const width = Math.max(300, Math.floor(els.topologyGraph.clientWidth || 900));
+  const height = Math.max(260, Math.floor(els.topologyGraph.clientHeight || 500));
+  runTopologyLayout(nodes, links, width, height);
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("class", "topology-svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.style.background = "radial-gradient(1200px 700px at 50% 35%, #121c23 0%, #0b1115 62%, #080d11 100%)";
+  bindTopologyViewport(svg, width, height);
+
+  const viewport = document.createElementNS(svgNS, "g");
+  viewport.setAttribute("class", "topology-viewport");
+  svg.append(viewport);
+
+  for (const link of links) {
+    const source = nodes[link.source];
+    const target = nodes[link.target];
+    if (!source || !target) continue;
+
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", `${source.x}`);
+    line.setAttribute("y1", `${source.y}`);
+    line.setAttribute("x2", `${target.x}`);
+    line.setAttribute("y2", `${target.y}`);
+    line.setAttribute("class", `topology-link ${isSelectedLink(link) ? "selected" : ""}`);
+    line.setAttribute("stroke-width", `${1 + Math.min(3.5, link.count * 0.85)}`);
+    line.setAttribute("opacity", `${Math.min(0.85, 0.35 + link.count * 0.08)}`);
+    line.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.topology.selectedNode = "";
+      state.topology.selectedLink = link.key;
+      if (els.topologyDetails) {
+        els.topologyDetails.textContent = `${source.label} ↔ ${target.label} | traces: ${link.count} | avg link SNR: ${formatSNRValue(link.avgSNR)} dB`;
+      }
+      renderTopology();
+    });
+    viewport.append(line);
+  }
+
+  const topLabelCount = Math.min(nodes.length, 34);
+  const labelThreshold = [...nodes].sort((a, b) => b.degree - a.degree)[Math.max(0, topLabelCount - 1)]?.degree ?? 0;
+
+  for (const node of nodes) {
+    const circle = document.createElementNS(svgNS, "circle");
+    circle.setAttribute("cx", `${node.x}`);
+    circle.setAttribute("cy", `${node.y}`);
+    circle.setAttribute("r", `${4.5 + Math.min(8, node.degree * 0.9)}`);
+    circle.setAttribute("class", `topology-node ${isSelectedNode(node) ? "selected" : ""}`);
+    circle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.topology.selectedLink = "";
+      state.topology.selectedNode = node.key;
+      if (els.topologyDetails) {
+        els.topologyDetails.textContent = `${node.label} | links: ${node.degree} | node: ${formatNodeID(node.num)}`;
+      }
+      renderTopology();
+    });
+    viewport.append(circle);
+
+    if (node.degree >= labelThreshold || nodes.length <= 14) {
+      const label = document.createElementNS(svgNS, "text");
+      label.setAttribute("x", `${node.x + 8}`);
+      label.setAttribute("y", `${node.y - 8}`);
+      label.setAttribute("class", "topology-label");
+      label.textContent = node.label;
+      viewport.append(label);
+    }
+  }
+
+  svg.addEventListener("click", () => {
+    state.topology.selectedNode = "";
+    state.topology.selectedLink = "";
+    if (els.topologyDetails) {
+      els.topologyDetails.textContent = "Click a node or link for details.";
+    }
+    renderTopology();
+  });
+
+  applyTopologyViewport(svg, width, height);
+  const details = els.topologyDetails;
+  els.topologyGraph.replaceChildren(svg);
+  if (details) els.topologyGraph.append(details);
+}
+
+function runTopologyLayout(nodes, links, width, height) {
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const nodeCount = Math.max(1, nodes.length);
+  const area = width * height;
+  const base = Math.sqrt(area / nodeCount);
+  const repulsion = Math.max(400, base * base * 1.1);
+  const spring = 0.015;
+  const rest = Math.max(40, Math.min(140, base * 0.88));
+  const gravity = 0.018;
+
+  nodes.forEach((node, index) => {
+    const angle = (index / nodeCount) * Math.PI * 2;
+    const radius = Math.min(width, height) * 0.18;
+    node.x = centerX + Math.cos(angle) * radius;
+    node.y = centerY + Math.sin(angle) * radius;
+    node.vx = 0;
+    node.vy = 0;
+  });
+
+  for (let step = 0; step < 260; step += 1) {
+    for (let i = 0; i < nodes.length; i += 1) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const b = nodes[j];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let dist2 = dx * dx + dy * dy;
+        if (dist2 < 1) {
+          dx = (Math.random() - 0.5) * 0.01;
+          dy = (Math.random() - 0.5) * 0.01;
+          dist2 = dx * dx + dy * dy;
+        }
+        const dist = Math.sqrt(dist2);
+        const force = repulsion / dist2;
+        const fx = (force * dx) / dist;
+        const fy = (force * dy) / dist;
+        a.vx -= fx;
+        a.vy -= fy;
+        b.vx += fx;
+        b.vy += fy;
+      }
+    }
+
+    for (const link of links) {
+      const a = nodes[link.source];
+      const b = nodes[link.target];
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      const dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const desired = Math.max(28, rest - Math.min(30, link.count * 4));
+      const force = (dist - desired) * spring;
+      const fx = (force * dx) / dist;
+      const fy = (force * dy) / dist;
+      a.vx += fx;
+      a.vy += fy;
+      b.vx -= fx;
+      b.vy -= fy;
+    }
+
+    for (const node of nodes) {
+      node.vx += (centerX - node.x) * gravity;
+      node.vy += (centerY - node.y) * gravity;
+      node.vx *= 0.83;
+      node.vy *= 0.83;
+      node.x += node.vx;
+      node.y += node.vy;
+      node.x = Math.max(18, Math.min(width - 18, node.x));
+      node.y = Math.max(18, Math.min(height - 18, node.y));
+    }
+  }
+}
+
+function buildTopologyGraphData() {
+  const nodeByNum = new Map();
+
+  const links = new Map();
+  const addLink = (from, to, snrValue) => {
+    if (!from || !to || from === to) return;
+    const left = Math.min(from, to);
+    const right = Math.max(from, to);
+    const key = `${left}:${right}`;
+    const entry = links.get(key) || { key, from: left, to: right, count: 0, snrTotal: 0, snrCount: 0 };
+    if (Number.isFinite(snrValue)) {
+      entry.snrTotal += snrValue;
+      entry.snrCount += 1;
+    }
+    entry.count += 1;
+    links.set(key, entry);
+  };
+
+  for (const route of state.traceRoutes) {
+    const chains = [
+      route.towards ?? route.Towards ?? [],
+      route.back ?? route.Back ?? [],
+    ];
+    for (const chain of chains) {
+      let previous = 0;
+      for (const hop of chain) {
+        const node = hop.node ?? hop.Node ?? {};
+        const num = nodeNum(node);
+        if (!num) continue;
+        nodeByNum.set(num, nodeShortName(node) || nodeLongName(node) || nodeByNum.get(num) || formatNodeID(num));
+        const snr = hop.snr ?? hop.SNR;
+        if (previous) addLink(previous, num, Number(snr));
+        previous = num;
+      }
+    }
+  }
+
+  const nodeNums = [...nodeByNum.keys()].sort((a, b) => a - b);
+  const nodes = nodeNums.map((num) => ({ num, label: nodeByNum.get(num), degree: 0, x: 0, y: 0 }));
+  const indexByNum = new Map(nodes.map((node, index) => [node.num, index]));
+  const graphLinks = [];
+  for (const link of links.values()) {
+    const source = indexByNum.get(link.from);
+    const target = indexByNum.get(link.to);
+    if (source === undefined || target === undefined) continue;
+    nodes[source].degree += 1;
+    nodes[target].degree += 1;
+    graphLinks.push({ source, target, count: link.count, key: link.key, avgSNR: link.snrCount > 0 ? (link.snrTotal / link.snrCount) : null });
+  }
+  nodes.forEach((node) => { node.key = `num:${node.num}`; });
+  return { nodes, links: graphLinks };
+}
+
+function formatSNRValue(value) {
+  if (!Number.isFinite(value)) return "n/a";
+  return Number(value).toFixed(1);
+}
+
+function isSelectedNode(node) {
+  return state.topology.selectedNode && state.topology.selectedNode === node.key;
+}
+
+function isSelectedLink(link) {
+  return state.topology.selectedLink && state.topology.selectedLink === link.key;
+}
+
+function bindTopologyViewport(svg, width, height) {
+  svg.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const delta = event.deltaY < 0 ? 1.12 : 0.9;
+    state.topology.zoom = Math.max(0.35, Math.min(4.5, state.topology.zoom * delta));
+    applyTopologyViewport(svg, width, height);
+  }, { passive: false });
+
+  svg.addEventListener("pointerdown", (event) => {
+    state.topology.dragging = true;
+    state.topology.dragX = event.clientX;
+    state.topology.dragY = event.clientY;
+    els.topologyGraph.style.cursor = "grabbing";
+  });
+  svg.addEventListener("pointermove", (event) => {
+    if (!state.topology.dragging) return;
+    const dx = event.clientX - state.topology.dragX;
+    const dy = event.clientY - state.topology.dragY;
+    state.topology.dragX = event.clientX;
+    state.topology.dragY = event.clientY;
+    state.topology.panX += dx;
+    state.topology.panY += dy;
+    applyTopologyViewport(svg, width, height);
+  });
+  const endDrag = () => {
+    state.topology.dragging = false;
+    if (els.topologyGraph) els.topologyGraph.style.cursor = "grab";
+  };
+  svg.addEventListener("pointerup", endDrag);
+  svg.addEventListener("pointerleave", endDrag);
+}
+
+function applyTopologyViewport(svg, width, height) {
+  const viewport = svg.querySelector(".topology-viewport");
+  if (!viewport) return;
+  const cx = width / 2;
+  const cy = height / 2;
+  const tx = state.topology.panX;
+  const ty = state.topology.panY;
+  const z = state.topology.zoom;
+  viewport.setAttribute("transform", `translate(${tx},${ty}) translate(${cx},${cy}) scale(${z}) translate(${-cx},${-cy})`);
+}
+
 function traceKey(route = {}) {
   const requestID = route.requestID ?? route.RequestID ?? 0;
   const from = route.from ?? route.From ?? 0;
   const to = route.to ?? route.To ?? 0;
+  const receivedAt = route.receivedAt ?? route.ReceivedAt ?? "";
   if (Number(requestID) > 0) {
     return `id:${Number(requestID)}`;
   }
   if (Number(from) > 0 || Number(to) > 0) {
-    return `ft:${Number(from)}:${Number(to)}`;
+    if (receivedAt) {
+      return `ftt:${Number(from)}:${Number(to)}:${receivedAt}`;
+    }
+    return "";
   }
   return "";
 }
@@ -930,8 +1342,14 @@ function tracePopup(route, direction, hops) {
   const requestID = route.requestID ?? route.RequestID ?? 0;
   const from = route.from ?? route.From ?? 0;
   const to = route.to ?? route.To ?? 0;
+  const rxRSSI = route.rxRssi ?? route.RxRSSI;
+  const rxSNR = route.rxSnr ?? route.RxSNR;
+  const rx = [];
+  if (rxRSSI !== null && rxRSSI !== undefined) rx.push(`rssi ${Number(rxRSSI).toFixed(0)}dBm`);
+  if (rxSNR !== null && rxSNR !== undefined) rx.push(`snr ${Number(rxSNR).toFixed(1)}dB`);
   return `<strong>Trace ${escapeHTML(requestID.toString(16).padStart(8, "0"))}</strong><br>` +
     `${escapeHTML(direction)} • hops with geo: ${hops}<br>` +
+    `${rx.length ? `${escapeHTML(rx.join(" • "))}<br>` : ""}` +
     `from ${escapeHTML(formatNodeID(from))} to ${escapeHTML(formatNodeID(to))}`;
 }
 
@@ -1093,10 +1511,17 @@ function activateTab(name) {
       }
     });
   }
+  if (name === "topology") {
+    requestAnimationFrame(() => renderTopology());
+  }
 }
 
 function isMapTabActive() {
   return document.querySelector('[data-view="map"]')?.classList.contains("active") ?? false;
+}
+
+function isTopologyTabActive() {
+  return document.querySelector('[data-view="topology"]')?.classList.contains("active") ?? false;
 }
 
 function renderMessages() {
@@ -1874,11 +2299,19 @@ function formatTrace(route) {
 	const to = route.to ?? route.To ?? 0;
 	const towards = route.towards ?? route.Towards ?? [];
 	const back = route.back ?? route.Back ?? [];
+	const rxRSSI = route.rxRssi ?? route.RxRSSI;
+	const rxSNR = route.rxSnr ?? route.RxSNR;
 	const lines = [
 		`id=${requestID.toString(16).padStart(8, "0")}`,
 		`from=${formatNodeID(from)} to=${formatNodeID(to)}`,
 		`towards: ${formatHops(towards)}`,
 	];
+	if (rxRSSI !== null || rxSNR !== null) {
+		let line = "rx:";
+		if (rxRSSI !== null && rxRSSI !== undefined) line += ` rssi=${Number(rxRSSI).toFixed(0)}dBm`;
+		if (rxSNR !== null && rxSNR !== undefined) line += ` snr=${Number(rxSNR).toFixed(1)}dB`;
+		lines.push(line);
+	}
 	if (back.length) {
 		lines.push(`back:    ${formatHops(back)}`);
 	}

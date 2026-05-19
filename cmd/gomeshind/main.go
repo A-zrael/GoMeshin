@@ -54,6 +54,18 @@ type traceRouteRequest struct {
 	TimeoutSeconds int     `json:"timeoutSeconds,omitempty"`
 }
 
+type radioSettingsUpdateRequest struct {
+	HopLimit  *uint32 `json:"hopLimit,omitempty"`
+	TxEnabled *bool   `json:"txEnabled,omitempty"`
+	Role      *string `json:"role,omitempty"`
+}
+
+type fixedPositionRequest struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Altitude  *int32  `json:"altitude,omitempty"`
+}
+
 type eventEnvelope struct {
 	Type string      `json:"type"`
 	Time time.Time   `json:"time"`
@@ -159,6 +171,8 @@ func (s *apiServer) routes() http.Handler {
 	mux.HandleFunc("/traceroute", s.handleTraceRoute)
 	mux.HandleFunc("/traceroutes", s.handleTraceRoutes)
 	mux.HandleFunc("/traceroutes/pending", s.handlePendingTraceRoutes)
+	mux.HandleFunc("/settings/radio", s.handleRadioSettings)
+	mux.HandleFunc("/settings/location", s.handleFixedLocation)
 	mux.HandleFunc("/events", s.handleEvents)
 	if s.webDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(s.webDir)))
@@ -506,20 +520,24 @@ func (s *apiServer) handleTraceRoute(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	route, err := s.mesh.TraceRoute(ctx, mesh.TraceRouteOptions{
+	pending, err := s.mesh.StartTraceRoute(ctx, mesh.TraceRouteOptions{
 		To:       uint32(req.To),
 		Channel:  req.Channel,
 		HopLimit: req.HopLimit,
 	})
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			writeError(w, http.StatusGatewayTimeout, err)
-			return
-		}
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, route)
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"requestID": pending.RequestID,
+		"to":        pending.To,
+		"channel":   pending.Channel,
+		"hopLimit":  pending.HopLimit,
+		"createdAt": pending.CreatedAt,
+		"expiresAt": pending.ExpiresAt,
+		"status":    "pending",
+	})
 }
 
 func (s *apiServer) handleTraceRoutes(w http.ResponseWriter, r *http.Request) {
@@ -541,6 +559,70 @@ func (s *apiServer) handlePendingTraceRoutes(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, s.mesh.PendingTraces())
+}
+
+func (s *apiServer) handleRadioSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		settings, err := s.mesh.RadioSettings(ctx)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	case http.MethodPost:
+		var req radioSettingsUpdateRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		settings, err := s.mesh.UpdateRadioSettings(ctx, mesh.RadioSettingsUpdate{
+			HopLimit:  req.HopLimit,
+			TxEnabled: req.TxEnabled,
+			Role:      req.Role,
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	default:
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s *apiServer) handleFixedLocation(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var req fixedPositionRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		if err := s.mesh.SetFixedPosition(ctx, mesh.FixedPosition{
+			Latitude:  req.Latitude,
+			Longitude: req.Longitude,
+			Altitude:  req.Altitude,
+		}); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	case http.MethodDelete:
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		if err := s.mesh.ClearFixedPosition(ctx); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	default:
+		methodNotAllowed(w, http.MethodPost, http.MethodDelete)
+	}
 }
 
 func (s *apiServer) handleEvents(w http.ResponseWriter, r *http.Request) {

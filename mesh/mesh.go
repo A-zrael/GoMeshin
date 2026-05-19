@@ -13,6 +13,8 @@ import (
 	"meshin/meshtasticapi"
 )
 
+const tracePendingTTL = 5 * time.Minute
+
 type Config struct {
 	Port  string
 	Baud  int
@@ -54,6 +56,9 @@ type Mesh struct {
 	traces        map[uint32]chan TraceRoute
 	traceResolved map[uint32]TraceRoute
 	tracePending  map[uint32]PendingTrace
+
+	adminMu            sync.Mutex
+	adminConfigWaiters map[uint32]chan meshtastic.Config
 }
 
 type Message struct {
@@ -73,6 +78,8 @@ type TraceRoute struct {
 	To         uint32
 	Towards    []TraceHop
 	Back       []TraceHop
+	RxRSSI     *int32
+	RxSNR      *float32
 	ReceivedAt time.Time
 }
 
@@ -244,6 +251,26 @@ type PendingTrace struct {
 	ExpiresAt time.Time
 }
 
+type RadioSettings struct {
+	HopLimit    uint32 `json:"hopLimit"`
+	TxEnabled   bool   `json:"txEnabled"`
+	ModemPreset string `json:"modemPreset"`
+	Region      string `json:"region"`
+	Role        string `json:"role"`
+}
+
+type RadioSettingsUpdate struct {
+	HopLimit  *uint32 `json:"hopLimit,omitempty"`
+	TxEnabled *bool   `json:"txEnabled,omitempty"`
+	Role      *string `json:"role,omitempty"`
+}
+
+type FixedPosition struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Altitude  *int32  `json:"altitude,omitempty"`
+}
+
 func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 	if cfg.Store == nil {
 		cfg.Store = NewMemoryStore()
@@ -285,6 +312,7 @@ func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 		traces:                 make(map[uint32]chan TraceRoute),
 		traceResolved:          make(map[uint32]TraceRoute),
 		tracePending:           make(map[uint32]PendingTrace),
+		adminConfigWaiters:     make(map[uint32]chan meshtastic.Config),
 	}
 
 	for _, channel := range radio.Channels() {
@@ -296,9 +324,8 @@ func Open(ctx context.Context, cfg Config) (*Mesh, error) {
 			ID:        node.ID,
 			LongName:  node.LongName,
 			ShortName: node.ShortName,
-			LastSeen:  time.Now(),
 		}
-		m.upsertNode(meshNode)
+		m.seedNode(meshNode)
 		if node.Position != nil {
 			m.upsertPosition(convertPosition(*node.Position, m.nodeRef))
 		}
@@ -377,6 +404,139 @@ func (m *Mesh) Send(text string, opts SendOptions) (uint32, error) {
 	m.publish(message)
 
 	return id, nil
+}
+
+func (m *Mesh) RadioSettings(ctx context.Context) (RadioSettings, error) {
+	lora, err := m.requestConfig(ctx, meshtastic.AdminMessage_LORA_CONFIG)
+	if err != nil {
+		return RadioSettings{}, err
+	}
+	device, err := m.requestConfig(ctx, meshtastic.AdminMessage_DEVICE_CONFIG)
+	if err != nil {
+		return RadioSettings{}, err
+	}
+	loraCfg := lora.GetLora()
+	deviceCfg := device.GetDevice()
+	if loraCfg == nil || deviceCfg == nil {
+		return RadioSettings{}, errors.New("radio returned incomplete settings")
+	}
+	return RadioSettings{
+		HopLimit:    loraCfg.GetHopLimit(),
+		TxEnabled:   loraCfg.GetTxEnabled(),
+		ModemPreset: loraCfg.GetModemPreset().String(),
+		Region:      loraCfg.GetRegion().String(),
+		Role:        deviceCfg.GetRole().String(),
+	}, nil
+}
+
+func (m *Mesh) UpdateRadioSettings(ctx context.Context, update RadioSettingsUpdate) (RadioSettings, error) {
+	myNode := m.myNode
+	if myNode == 0 {
+		return RadioSettings{}, errors.New("local node number is not known yet")
+	}
+
+	if update.HopLimit != nil || update.TxEnabled != nil {
+		current, err := m.requestConfig(ctx, meshtastic.AdminMessage_LORA_CONFIG)
+		if err != nil {
+			return RadioSettings{}, err
+		}
+		currentLora := current.GetLora()
+		if currentLora == nil {
+			return RadioSettings{}, errors.New("missing current lora config")
+		}
+		if update.HopLimit != nil {
+			currentLora.HopLimit = *update.HopLimit
+		}
+		if update.TxEnabled != nil {
+			currentLora.TxEnabled = *update.TxEnabled
+		}
+		if _, err := m.sendAdmin(ctx, myNode, &meshtastic.AdminMessage{
+			PayloadVariant: &meshtastic.AdminMessage_SetConfig{
+				SetConfig: &meshtastic.Config{
+					PayloadVariant: &meshtastic.Config_Lora{
+						Lora: currentLora,
+					},
+				},
+			},
+		}); err != nil {
+			return RadioSettings{}, err
+		}
+	}
+
+	if update.Role != nil {
+		roleValue, ok := meshtastic.Config_DeviceConfig_Role_value[*update.Role]
+		if !ok {
+			return RadioSettings{}, fmt.Errorf("invalid role %q", *update.Role)
+		}
+		current, err := m.requestConfig(ctx, meshtastic.AdminMessage_DEVICE_CONFIG)
+		if err != nil {
+			return RadioSettings{}, err
+		}
+		currentDevice := current.GetDevice()
+		if currentDevice == nil {
+			return RadioSettings{}, errors.New("missing current device config")
+		}
+		currentDevice.Role = meshtastic.Config_DeviceConfig_Role(roleValue)
+		if _, err := m.sendAdmin(ctx, myNode, &meshtastic.AdminMessage{
+			PayloadVariant: &meshtastic.AdminMessage_SetConfig{
+				SetConfig: &meshtastic.Config{
+					PayloadVariant: &meshtastic.Config_Device{
+						Device: currentDevice,
+					},
+				},
+			},
+		}); err != nil {
+			return RadioSettings{}, err
+		}
+	}
+
+	return m.RadioSettings(ctx)
+}
+
+func (m *Mesh) SetFixedPosition(ctx context.Context, position FixedPosition) error {
+	m.mu.RLock()
+	myNode := m.myNode
+	m.mu.RUnlock()
+	if myNode == 0 {
+		return errors.New("local node number is not known yet")
+	}
+	if position.Latitude < -90 || position.Latitude > 90 {
+		return errors.New("latitude must be between -90 and 90")
+	}
+	if position.Longitude < -180 || position.Longitude > 180 {
+		return errors.New("longitude must be between -180 and 180")
+	}
+	latI := int32(position.Latitude * 1e7)
+	lonI := int32(position.Longitude * 1e7)
+	payload := &meshtastic.Position{
+		LatitudeI:  &latI,
+		LongitudeI: &lonI,
+		Time:       uint32(time.Now().Unix()),
+	}
+	if position.Altitude != nil {
+		payload.Altitude = position.Altitude
+	}
+	_, err := m.sendAdmin(ctx, myNode, &meshtastic.AdminMessage{
+		PayloadVariant: &meshtastic.AdminMessage_SetFixedPosition{
+			SetFixedPosition: payload,
+		},
+	})
+	return err
+}
+
+func (m *Mesh) ClearFixedPosition(ctx context.Context) error {
+	m.mu.RLock()
+	myNode := m.myNode
+	m.mu.RUnlock()
+	if myNode == 0 {
+		return errors.New("local node number is not known yet")
+	}
+	_, err := m.sendAdmin(ctx, myNode, &meshtastic.AdminMessage{
+		PayloadVariant: &meshtastic.AdminMessage_RemoveFixedPosition{
+			RemoveFixedPosition: true,
+		},
+	})
+	return err
 }
 
 func (m *Mesh) AddChannel(ctx context.Context, opts ChannelOptions) error {
@@ -482,18 +642,51 @@ func (m *Mesh) RemoveChannel(ctx context.Context, name string) error {
 }
 
 func (m *Mesh) TraceRoute(ctx context.Context, opts TraceRouteOptions) (TraceRoute, error) {
+	pending, err := m.StartTraceRoute(ctx, opts)
+	if err != nil {
+		return TraceRoute{}, err
+	}
+
+	reply := make(chan TraceRoute, 1)
+	m.traceMu.Lock()
+	if cached, ok := m.traceResolved[pending.RequestID]; ok {
+		delete(m.traceResolved, pending.RequestID)
+		m.traceMu.Unlock()
+		m.forgetTrace(pending.RequestID)
+		return cached, nil
+	}
+	m.traces[pending.RequestID] = reply
+	m.traceMu.Unlock()
+	defer m.forgetTrace(pending.RequestID)
+
+	select {
+	case <-ctx.Done():
+		return TraceRoute{RequestID: pending.RequestID, To: opts.To}, ctx.Err()
+	case trace := <-reply:
+		return trace, nil
+	}
+}
+
+func (m *Mesh) StartTraceRoute(ctx context.Context, opts TraceRouteOptions) (PendingTrace, error) {
 	if opts.To == 0 {
-		return TraceRoute{}, errors.New("destination node is required")
+		return PendingTrace{}, errors.New("destination node is required")
+	}
+	effectiveHopLimit := opts.HopLimit
+	if effectiveHopLimit == 0 {
+		settings, err := m.RadioSettings(ctx)
+		if err == nil && settings.HopLimit > 0 {
+			effectiveHopLimit = settings.HopLimit
+		}
 	}
 
 	channelIndex, err := m.resolveChannel(opts.Channel)
 	if err != nil {
-		return TraceRoute{}, err
+		return PendingTrace{}, err
 	}
 
 	payload, err := proto.Marshal(&meshtastic.RouteDiscovery{})
 	if err != nil {
-		return TraceRoute{}, err
+		return PendingTrace{}, err
 	}
 
 	done := make(chan struct {
@@ -507,7 +700,7 @@ func (m *Mesh) TraceRoute(ctx context.Context, opts TraceRouteOptions) (TraceRou
 			Port:     meshtastic.PortNum_TRACEROUTE_APP,
 			Payload:  payload,
 			WantResp: true,
-			HopLimit: opts.HopLimit,
+			HopLimit: effectiveHopLimit,
 		})
 		done <- struct {
 			id  uint32
@@ -517,39 +710,25 @@ func (m *Mesh) TraceRoute(ctx context.Context, opts TraceRouteOptions) (TraceRou
 
 	select {
 	case <-ctx.Done():
-		return TraceRoute{}, ctx.Err()
+		return PendingTrace{}, ctx.Err()
 	case result := <-done:
 		if result.err != nil {
-			return TraceRoute{}, result.err
+			return PendingTrace{}, result.err
 		}
 
-		reply := make(chan TraceRoute, 1)
-		deadline, _ := ctx.Deadline()
 		createdAt := time.Now()
-		m.traceMu.Lock()
-		if cached, ok := m.traceResolved[result.id]; ok {
-			delete(m.traceResolved, result.id)
-			m.traceMu.Unlock()
-			return cached, nil
-		}
-		m.traces[result.id] = reply
-		m.tracePending[result.id] = PendingTrace{
+		pending := PendingTrace{
 			RequestID: result.id,
 			To:        opts.To,
 			Channel:   opts.Channel,
-			HopLimit:  opts.HopLimit,
+			HopLimit:  effectiveHopLimit,
 			CreatedAt: createdAt,
-			ExpiresAt: deadline,
+			ExpiresAt: createdAt.Add(tracePendingTTL),
 		}
+		m.traceMu.Lock()
+		m.tracePending[result.id] = pending
 		m.traceMu.Unlock()
-		defer m.forgetTrace(result.id)
-
-		select {
-		case <-ctx.Done():
-			return TraceRoute{RequestID: result.id, To: opts.To}, ctx.Err()
-		case trace := <-reply:
-			return trace, nil
-		}
+		return pending, nil
 	}
 }
 
@@ -813,6 +992,11 @@ func (m *Mesh) run() {
 
 func (m *Mesh) handleEvent(event meshtasticapi.Event) {
 	switch event.Type {
+	case meshtasticapi.EventPacket:
+		if event.Packet == nil {
+			return
+		}
+		m.resolveAdminConfig(*event.Packet)
 	case meshtasticapi.EventMyNode:
 		if event.MyNode == nil {
 			return
@@ -824,6 +1008,7 @@ func (m *Mesh) handleEvent(event meshtasticapi.Event) {
 		if event.Packet == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.Packet.From, event.Packet.RxTime)
 		message := m.convertMessage(*event.Packet)
 		_ = m.store.SaveMessage(m.ctx, message)
 		m.publish(message)
@@ -851,42 +1036,129 @@ func (m *Mesh) handleEvent(event meshtasticapi.Event) {
 		if event.Position == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.Position.NodeNum, event.Position.ReceivedAt)
 		m.upsertPosition(convertPosition(*event.Position, m.nodeRef))
 	case meshtasticapi.EventEnvironment:
 		if event.Environment == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.Environment.NodeNum, event.Environment.ReceivedAt)
 		m.upsertEnvironment(convertEnvironmentTelemetry(*event.Environment, m.nodeRef))
 	case meshtasticapi.EventDevice:
 		if event.Device == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.Device.NodeNum, event.Device.ReceivedAt)
 		m.upsertDeviceTelemetry(convertDeviceTelemetry(*event.Device, m.nodeRef))
 	case meshtasticapi.EventPower:
 		if event.Power == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.Power.NodeNum, event.Power.ReceivedAt)
 		m.upsertPowerTelemetry(convertPowerTelemetry(*event.Power, m.nodeRef))
 	case meshtasticapi.EventAirQuality:
 		if event.AirQuality == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.AirQuality.NodeNum, event.AirQuality.ReceivedAt)
 		m.upsertAirQualityTelemetry(convertAirQualityTelemetry(*event.AirQuality, m.nodeRef))
 	case meshtasticapi.EventLocalStats:
 		if event.LocalStats == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.LocalStats.NodeNum, event.LocalStats.ReceivedAt)
 		m.upsertLocalStatsTelemetry(convertLocalStatsTelemetry(*event.LocalStats, m.nodeRef))
 	case meshtasticapi.EventHealth:
 		if event.Health == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.Health.NodeNum, event.Health.ReceivedAt)
 		m.upsertHealthTelemetry(convertHealthTelemetry(*event.Health, m.nodeRef))
 	case meshtasticapi.EventTraceRoute:
 		if event.TraceRoute == nil {
 			return
 		}
+		m.touchNodeLastSeen(event.TraceRoute.From, time.Now())
 		m.resolveTrace(convertTraceRoute(*event.TraceRoute, m.nodeRef))
+	}
+}
+
+func (m *Mesh) requestConfig(ctx context.Context, configType meshtastic.AdminMessage_ConfigType) (meshtastic.Config, error) {
+	m.mu.RLock()
+	myNode := m.myNode
+	m.mu.RUnlock()
+	if myNode == 0 {
+		return meshtastic.Config{}, errors.New("local node number is not known yet")
+	}
+
+	payload, err := proto.Marshal(&meshtastic.AdminMessage{
+		PayloadVariant: &meshtastic.AdminMessage_GetConfigRequest{
+			GetConfigRequest: configType,
+		},
+	})
+	if err != nil {
+		return meshtastic.Config{}, err
+	}
+
+	requestID, err := m.radio.SendData(meshtasticapi.SendOptions{
+		To:       myNode,
+		Port:     meshtastic.PortNum_ADMIN_APP,
+		Payload:  payload,
+		WantAck:  true,
+		WantResp: true,
+		PKI:      true,
+	})
+	if err != nil {
+		return meshtastic.Config{}, err
+	}
+
+	waiter := make(chan meshtastic.Config, 1)
+	m.adminMu.Lock()
+	m.adminConfigWaiters[requestID] = waiter
+	m.adminMu.Unlock()
+	defer func() {
+		m.adminMu.Lock()
+		delete(m.adminConfigWaiters, requestID)
+		m.adminMu.Unlock()
+	}()
+
+	select {
+	case <-ctx.Done():
+		return meshtastic.Config{}, ctx.Err()
+	case config := <-waiter:
+		return config, nil
+	}
+}
+
+func (m *Mesh) resolveAdminConfig(packet meshtasticapi.Packet) {
+	if packet.Port != meshtastic.PortNum_ADMIN_APP || len(packet.Payload) == 0 {
+		return
+	}
+	var admin meshtastic.AdminMessage
+	if err := proto.Unmarshal(packet.Payload, &admin); err != nil {
+		return
+	}
+	cfg := admin.GetGetConfigResponse()
+	if cfg == nil {
+		return
+	}
+	requestID := packet.ReplyID
+	if requestID == 0 {
+		requestID = packet.RequestID
+	}
+	if requestID == 0 {
+		return
+	}
+
+	m.adminMu.Lock()
+	waiter := m.adminConfigWaiters[requestID]
+	m.adminMu.Unlock()
+	if waiter == nil {
+		return
+	}
+	select {
+	case waiter <- *cfg:
+	default:
 	}
 }
 
@@ -974,6 +1246,46 @@ func (m *Mesh) upsertNode(node Node) {
 		node.Environment = &environment
 	}
 	m.nodes[node.Num] = node
+	m.mu.Unlock()
+
+	_ = m.store.SaveNode(m.ctx, node)
+}
+
+func (m *Mesh) seedNode(node Node) {
+	m.mu.Lock()
+	if position, ok := m.positions[node.Num]; ok && node.Position == nil {
+		node.Position = &position
+	}
+	if environment, ok := m.environments[node.Num]; ok && node.Environment == nil {
+		node.Environment = &environment
+	}
+	m.nodes[node.Num] = node
+	m.mu.Unlock()
+}
+
+func (m *Mesh) touchNodeLastSeen(nodeNum uint32, seenAt time.Time) {
+	if nodeNum == 0 {
+		return
+	}
+	if seenAt.IsZero() {
+		seenAt = time.Now()
+	}
+
+	m.mu.Lock()
+	node := m.nodes[nodeNum]
+	if node.Num == 0 {
+		node.Num = nodeNum
+	}
+	if seenAt.After(node.LastSeen) || node.LastSeen.IsZero() {
+		node.LastSeen = seenAt
+	}
+	if position, ok := m.positions[nodeNum]; ok && node.Position == nil {
+		node.Position = &position
+	}
+	if environment, ok := m.environments[nodeNum]; ok && node.Environment == nil {
+		node.Environment = &environment
+	}
+	m.nodes[nodeNum] = node
 	m.mu.Unlock()
 
 	_ = m.store.SaveNode(m.ctx, node)
@@ -1189,6 +1501,8 @@ func (m *Mesh) resolveTrace(route TraceRoute) {
 
 	m.traceMu.Lock()
 	reply := m.traces[route.RequestID]
+	delete(m.tracePending, route.RequestID)
+	delete(m.traces, route.RequestID)
 	if reply == nil {
 		m.traceResolved[route.RequestID] = route
 		if len(m.traceResolved) > 512 {
@@ -1220,8 +1534,14 @@ func (m *Mesh) forgetTrace(id uint32) {
 func (m *Mesh) PendingTraces() []PendingTrace {
 	m.traceMu.Lock()
 	defer m.traceMu.Unlock()
+	now := time.Now()
 	out := make([]PendingTrace, 0, len(m.tracePending))
-	for _, pending := range m.tracePending {
+	for id, pending := range m.tracePending {
+		if !pending.ExpiresAt.IsZero() && now.After(pending.ExpiresAt) {
+			delete(m.tracePending, id)
+			delete(m.traces, id)
+			continue
+		}
 		out = append(out, pending)
 	}
 	return out
@@ -1310,6 +1630,8 @@ func convertTraceRoute(route meshtasticapi.TraceRoute, lookup func(uint32) NodeR
 		To:        route.To,
 		Towards:   convertTraceHops(append(append([]uint32{route.To}, route.Route...), route.From), route.SNRTowards, lookup),
 		Back:      convertTraceHops(append(append([]uint32{route.From}, route.RouteBack...), route.To), route.SNRBack, lookup),
+		RxRSSI:    route.RxRSSI,
+		RxSNR:     route.RxSNR,
 	}
 }
 
